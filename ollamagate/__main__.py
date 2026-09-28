@@ -91,13 +91,9 @@ def serve(
     fingerprint = tls_info.fingerprint if tls_info else None
 
     warnings = [f"{f.title}. {f.fix}" for f in doctor.check_ollama_binding(config) if f.level != "ok"]
-    from urllib.parse import urlsplit
-
-    if is_loopback_host(urlsplit(config.base_url).hostname or ""):
-        warnings.append("server.public_url is not set: pairing links point at loopback and phones can't reach them.")
 
     app = create_app(config, state, fingerprint=fingerprint)
-    server = build_server(config, app, state, tls_info)
+    server = build_server(config, app, state, tls_info, own_logging=no_tui)
     admin = Admin(state, config, fingerprint)
     # Bind now, so "address in use" is reported before any TUI takes over the terminal.
     sock = server.config.bind_socket()
@@ -106,6 +102,10 @@ def serve(
         typer.echo(f"OllamaGate listening on {config.base_url}")
         if tls_info:
             typer.echo(f"TLS certificate SHA-256: {format_fingerprint(tls_info.fingerprint)}")
+        from urllib.parse import urlsplit
+
+        if is_loopback_host(urlsplit(config.base_url).hostname or ""):
+            warnings.append("server.public_url is not set: pairing links point at loopback; phones can't reach them.")
         for w in warnings:
             typer.secho(f"WARNING: {w}", fg=typer.colors.RED, err=True)
         typer.echo("Pair a device with:  ollamagate pair")
@@ -124,8 +124,25 @@ def serve(
                 tui = GateTUI(
                     admin, services=server_task, warnings=warnings, log_lines=log_lines, ollama_url=config.ollama.url
                 )
-                await tui.run_async()
-                server.should_exit = True  # the owner quit the TUI
+                crashed = None
+                try:
+                    await tui.run_async()
+                except Exception as exc:  # noqa: BLE001
+                    crashed = exc
+                if tui.quit_confirmed or server_task.done():
+                    server.should_exit = True  # the owner quit (or the server already stopped)
+                else:
+                    # The TUI died on its own. Devices live in memory, so stopping the server
+                    # would disconnect everyone: keep serving headless instead.
+                    logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+                    for line in log_lines:
+                        typer.echo(line, err=True)
+                    typer.secho(
+                        f"The admin TUI stopped unexpectedly ({crashed!r}); the server keeps running headless. "
+                        "Use the CLI commands (ollamagate devices ...) or Ctrl+C to stop.",
+                        fg=typer.colors.RED,
+                        err=True,
+                    )
             await server_task
         finally:
             await control.close()
@@ -337,6 +354,26 @@ def devices_model_management(
     """Grant or revoke access to Ollama's model management endpoints."""
     d = _call(config_path, "devices.model_management", ref=device_id, allowed=allow)
     typer.echo(f"Model management for {safe(d['name'])!r}: {'allowed' if d['allow_model_management'] else 'blocked'}")
+
+
+@cli.command()
+def status(config_path: Optional[Path] = ConfigOption) -> None:
+    """Show the dashboard: URL, devices, streams, requests, pairing and lockdown state."""
+    d = _call(config_path, "dashboard")
+    pairing_state = "closed" if d["pairing"] is None else f"open ({int(d['pairing']['expires_at'] - time.time())}s left)"
+    rows = [
+        ("Public URL", d["base_url"]),
+        ("TLS", d["tls_mode"]),
+        ("Network mode", d["network_mode"]),
+        ("Uptime", f"{int(d['uptime'] // 60)} min"),
+        ("Lockdown", "ON" if d["lockdown"] else "off"),
+        ("Devices", f"{d['devices_active']} active / {d['devices']} total"),
+        ("Active streams", d["active_streams"]),
+        ("Requests", f"{d['requests_last_minute']}/min, {d['requests_today']} today"),
+        ("Pairing", pairing_state),
+    ]
+    for label, value in rows:
+        typer.echo(f"{label + ':':16} {safe(value)}")
 
 
 # ----- lockdown / settings -------------------------------------------------------------

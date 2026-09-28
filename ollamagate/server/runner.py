@@ -78,7 +78,9 @@ class GateServer(uvicorn.Server):
                 signal.signal(sig, handler)
 
 
-def build_uvicorn_config(config: Config, app: FastAPI, tls_info: TLSInfo | None) -> uvicorn.Config:
+def build_uvicorn_config(
+    config: Config, app: FastAPI, tls_info: TLSInfo | None, own_logging: bool = True
+) -> uvicorn.Config:
     protocol = make_guarded_protocol(
         header_timeout=config.server.header_timeout,
         max_connections_per_ip=config.server.max_connections_per_ip,
@@ -95,6 +97,9 @@ def build_uvicorn_config(config: Config, app: FastAPI, tls_info: TLSInfo | None)
         date_header=False,
         access_log=False,  # our own request log never records secrets or content
         log_level="warning",
+        # own_logging=False: leave logging alone so uvicorn's records reach our handlers
+        # (the TUI's in-memory buffer) instead of being written over the TUI.
+        log_config=uvicorn.config.LOGGING_CONFIG if own_logging else None,
         ssl_certfile=str(tls_info.cert_path) if tls_info else None,
         ssl_keyfile=str(tls_info.key_path) if tls_info else None,
         timeout_keep_alive=30,
@@ -109,5 +114,7 @@ def build_uvicorn_config(config: Config, app: FastAPI, tls_info: TLSInfo | None)
     return uv_config
 
 
-def build_server(config: Config, app: FastAPI, state: State, tls_info: TLSInfo | None) -> GateServer:
-    return GateServer(build_uvicorn_config(config, app, tls_info), state)
+def build_server(
+    config: Config, app: FastAPI, state: State, tls_info: TLSInfo | None, own_logging: bool = True
+) -> GateServer:
+    return GateServer(build_uvicorn_config(config, app, tls_info, own_logging), state)
