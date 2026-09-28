@@ -198,6 +198,8 @@ class State:
         # attacker can't flush real events out of the bounded audit log.
         self._noise_limiter = RateLimiter(NOISY_EVENTS_PER_MINUTE, 60.0)
         self.audit_suppressed = 0
+        # Called with every new AuditEntry (e.g. owner notifications); must not block.
+        self.audit_listeners: list[Any] = []
         self.audit_seq = 0
         self.started_at = time.time()
         self.version = 0
@@ -233,6 +235,11 @@ class State:
         )
         self.audit_log.append(entry)
         self._changed()
+        for listener in list(self.audit_listeners):
+            try:
+                listener(entry)
+            except Exception:  # noqa: BLE001 - a listener must never break auditing
+                pass
         return entry
 
     def audit_noisy(self, event: str, *, ip: str | None, **detail: Any) -> AuditEntry | None:
