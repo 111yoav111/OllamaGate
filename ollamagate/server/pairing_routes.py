@@ -18,10 +18,12 @@ from starlette.responses import JSONResponse, Response
 from ..config import Config
 from ..state import DeviceLimits, State
 from . import pairing
+from .app_routes import session_cookie_header
 from .body import BodyTooLarge, read_body_limited
 from ..ratelimit import RateLimiter, client_key
 
 MAX_CLAIM_BODY = 4096
+SESSION_MAX_AGE = 400 * 86400  # browsers cap cookies at 400 days; the token itself decides
 
 PAGE_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -138,7 +140,7 @@ def register_pairing_routes(
             record_failure(ip, "failed pairing attempts")
             return _json(403, {"error": "invalid pairing code", "attempts_left": result.attempts_left})
         assert result.device is not None and result.token is not None
-        return _json(
+        response = _json(
             200,
             {
                 "token": result.token,
@@ -146,5 +148,11 @@ def register_pairing_routes(
                 "name": result.device.name,
                 "base_url": config.base_url,
                 "fingerprint": fingerprint,
+                "app_url": "/app",
             },
         )
+        # Also sign this browser in to the built-in chat (HttpOnly: page scripts can't read it).
+        response.headers["Set-Cookie"] = session_cookie_header(
+            result.token, secure=config.tls.mode != "off", max_age=SESSION_MAX_AGE
+        )
+        return response

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import secrets
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -202,6 +203,8 @@ class State:
         self.version = 0
         # Lockdown: reject all proxied traffic and pairing, but keep every device.
         self.lockdown = False
+        # Signs browser CSRF tokens; new on every start, like everything else.
+        self.csrf_key = secrets.token_bytes(32)
         self.bans = bans or BanList()
         # Per-device requests-per-minute accounting (limits vary per device).
         self.device_rpm = RateLimiter(60, 60.0)

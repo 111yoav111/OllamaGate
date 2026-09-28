@@ -26,6 +26,7 @@ from ..textsafe import safe_text
 from . import auth, pairing
 from .body import BodyTooLarge, read_body_limited
 from .netutil import parse_networks, resolve_client_ip
+from .app_routes import register_app_routes
 from .pairing_routes import register_pairing_routes
 from .policy import (
     ACCOUNTED_ENDPOINTS,
@@ -244,7 +245,7 @@ def create_app(
         """Lets a device see what the server knows about it."""
         if state.lockdown:
             return lockdown_response()
-        outcome = auth.authenticate(state, auth.extract_bearer(request.headers))
+        outcome = auth.authenticate(state, auth.extract_credential(request.headers, request.cookies, state.csrf_key)[0])
         if outcome.result is not auth.AuthResult.OK or outcome.device is None:
             state.audit_noisy("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
             return unauthorized()
@@ -267,6 +268,7 @@ def create_app(
         )
 
     register_pairing_routes(app, config, state, fingerprint, client_ip, record_failure)
+    register_app_routes(app, state, unauthorized, secure_cookies=config.tls.mode != "off")
 
     gate = PriorityGate(config.server.max_upstream_concurrency)
     app.state.priority_gate = gate
@@ -278,7 +280,7 @@ def create_app(
     async def proxy(request: Request) -> Response:
         ip = client_ip(request)
         method, path = request.method, request.url.path
-        token = auth.extract_bearer(request.headers)
+        token, via_cookie = auth.extract_credential(request.headers, request.cookies, state.csrf_key)
 
         # 1. Lockdown rejects everything before auth (banned IPs never get here).
         if state.lockdown:
@@ -295,7 +297,8 @@ def create_app(
                 path=path,
                 user_agent=request.headers.get("user-agent", ""),
             )
-            if outcome.result in (auth.AuthResult.INVALID, auth.AuthResult.MISSING):
+            if outcome.result in (auth.AuthResult.INVALID, auth.AuthResult.MISSING) and not via_cookie:
+                # (A stale browser cookie, e.g. after a restart, is not an attack.)
                 record_failure(ip, "failed logins")
             if outcome.result is auth.AuthResult.SUSPENDED:
                 return error(403, "device suspended")
