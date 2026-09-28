@@ -53,9 +53,9 @@ def activity(device: Device, state: State, now: float | None = None) -> str:
 def device_view(device: Device, state: State) -> dict[str, Any]:
     """A JSON-safe view of a device. Never includes the token hash."""
     streams = state.device_streams(device.id)
-    today = state.usage_for(device.id)
-    month = state.usage_total(device.id, time.strftime("%Y-%m"))
-    total = state.usage_total(device.id)
+    today = state.usage_today(device.id)
+    month = state.usage_month(device.id)
+    total = state.usage_lifetime(device.id)
     return {
         "activity": activity(device, state),
         "client": summarize_ua(device.user_agent),
@@ -286,7 +286,7 @@ class Admin:
         if isinstance(value, str) and wanted is not str:
             if wanted is bool and value.lower() in ("true", "false", "on", "off", "yes", "no"):
                 value = value.lower() in ("true", "on", "yes")
-            elif wanted is int and value.strip().isascii() and value.strip().lstrip("-").isdigit():
+            elif wanted is int and len(value) <= 12 and value.strip().isascii() and value.strip().lstrip("-").isdigit():
                 value = int(value)
         if wanted is int and not _is_int(value) or wanted is not int and not isinstance(value, wanted):
             raise AdminError(f"{key} must be {wanted.__name__}")
@@ -307,8 +307,7 @@ class Admin:
     def dashboard(self) -> dict[str, Any]:
         state = self.state
         window = pairing.current_window(state)
-        day = time.strftime("%Y-%m-%d")
-        today = [u for (dev, d), u in state.usage.items() if d == day]
+        today = state.usage_all_today()
         return {
             "base_url": self.config.base_url,
             "tls_mode": self.config.tls.mode,
@@ -320,8 +319,8 @@ class Admin:
             "devices_active": sum(1 for d in state.list_devices() if d.status is DeviceStatus.ACTIVE),
             "active_streams": len(state.streams),
             "requests_last_minute": state.requests_last_minute(),
-            "requests_today": sum(u.requests for u in today),
-            "tokens_today": sum(u.prompt_tokens + u.completion_tokens for u in today),
+            "requests_today": today.requests,
+            "tokens_today": today.prompt_tokens + today.completion_tokens,
             "pairing": None if window is None else {"expires_at": window.expires_at, "attempts": window.attempts},
             "audit_suppressed": state.audit_suppressed,
         }
