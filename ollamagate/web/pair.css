@@ -1,0 +1,19 @@
+[hidden] { display: none !important; }
+:root { color-scheme: light dark; --accent: #3b82f6; --err: #dc2626; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 28rem; margin: 0 auto; padding: 2rem 1rem; }
+h1 { font-size: 1.5rem; }
+label { display: block; margin: 1rem 0; font-weight: 600; }
+input { display: block; width: 100%; margin-top: .25rem; padding: .6rem; font: inherit;
+        border: 1px solid #8888; border-radius: .4rem; }
+#code { font-family: ui-monospace, monospace; letter-spacing: .15em; text-transform: uppercase; }
+button { padding: .6rem 1.2rem; font: inherit; border: 0; border-radius: .4rem;
+         background: var(--accent); color: #fff; cursor: pointer; }
+button:disabled { opacity: .5; }
+#error, .warn { color: var(--err); font-weight: 600; }
+.token-row { display: flex; gap: .5rem; }
+.token-row input { font-family: ui-monospace, monospace; margin: 0; }
+dt { font-weight: 600; margin-top: .5rem; }
+dd { margin: 0; word-break: break-all; }
+code { font-family: ui-monospace, monospace; font-size: .9em; }

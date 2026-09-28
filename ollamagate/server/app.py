@@ -19,8 +19,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config import Config
 from ..state import RequestLogEntry, State
-from . import auth
+from . import auth, pairing
 from .netutil import parse_networks, resolve_client_ip
+from .pairing_routes import register_pairing_routes
 from .policy import EndpointKind, classify_endpoint
 from .proxy import (
     ClientGone,
@@ -99,6 +100,7 @@ def create_app(
     config: Config,
     state: State,
     *,
+    fingerprint: str | None = None,
     upstream_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     trusted = parse_networks(config.network.trusted_proxies)
@@ -108,6 +110,7 @@ def create_app(
             await asyncio.sleep(SWEEP_INTERVAL)
             try:
                 state.sweep()
+                pairing.current_window(state)  # expires (and audits) a lapsed window
             except Exception:  # noqa: BLE001 - keep sweeping no matter what
                 log.exception("state sweep failed")
 
@@ -163,6 +166,33 @@ def create_app(
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
         return PlainTextResponse("ok")
+
+    @app.get("/me", include_in_schema=False)
+    async def me(request: Request) -> Response:
+        """Lets a device see what the server knows about it."""
+        outcome = auth.authenticate(state, auth.extract_bearer(request.headers))
+        if outcome.result is not auth.AuthResult.OK or outcome.device is None:
+            state.audit("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
+            return unauthorized()
+        d = outcome.device
+        lim = config.limits
+        return JSONResponse(
+            {
+                "id": d.id,
+                "name": d.name,
+                "paired_via": d.paired_via,
+                "paired_at": d.paired_at,
+                "token_prefix": d.token_prefix,
+                "token_expires_at": d.token_expires_at,
+                "allow_model_management": d.allow_model_management,
+                "limits": {
+                    "max_concurrent": lim.max_concurrent,
+                    "max_body_bytes": config.server.max_body_bytes,
+                },
+            }
+        )
+
+    register_pairing_routes(app, config, state, fingerprint, client_ip)
 
     async def proxy(request: Request) -> Response:
         ip = client_ip(request)

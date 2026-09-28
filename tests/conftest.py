@@ -75,6 +75,10 @@ class Gate:
 
         return asyncio.run_coroutine_threadsafe(run(), loop).result(timeout=5)
 
+    def run(self, coro: Any) -> Any:
+        """Run a coroutine on the gate's event loop and return its result."""
+        return asyncio.run_coroutine_threadsafe(coro, self.app.state.loop).result(timeout=5)
+
     def new_device(self, name: str = "extra", **kwargs: Any) -> tuple[str, Device]:
         token = auth.new_device_token()
         device = self.call(
@@ -126,7 +130,7 @@ def gate_factory(fake_ollama, make_config):
         device = state.add_device(
             name="phone", token_hash=auth.hash_token(token), token_prefix=auth.display_prefix(token), paired_via="test"
         )
-        app = create_app(cfg, state)
+        app = create_app(cfg, state, fingerprint="ab" * 32)
         # Use the production uvicorn config (guarded protocol, limits, shutdown hook).
         gate_server = build_server(cfg, app, state, None)
         gate_server.config.log_level = "warning"
