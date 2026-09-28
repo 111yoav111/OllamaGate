@@ -214,6 +214,7 @@ async def test_search_filters_devices():
     app = GateTUI(admin)
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("/")
+        await until(pilot, lambda: getattr(app.focused, "id", None) == "device-search")
         await pilot.press(*"office")
         await pilot.pause()
         table = app.query_one("#device-table")
