@@ -110,6 +110,17 @@ class BansConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """Owner notifications (all off by default). See ollamagate/notify.py."""
+
+    ntfy_url: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    desktop: bool = False
+    events: list[str] = field(default_factory=lambda: ["pairing", "new_ip", "ban", "lockdown"])
+
+
+@dataclass
 class LoggingConfig:
     audit_size: int = 5000
     request_log_size: int = 5000
@@ -126,6 +137,7 @@ class Config:
     pairing: PairingConfig = field(default_factory=PairingConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     bans: BansConfig = field(default_factory=BansConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_dir: Path = field(default_factory=default_config_dir)
 
@@ -182,6 +194,14 @@ class Config:
             raise ConfigError("ollama.url must point at a loopback address (Ollama must stay local)")
         if s.public_url:
             validate_public_url(s.public_url)
+        n = self.notify
+        if n.ntfy_url and not n.ntfy_url.startswith("https://"):
+            raise ConfigError("notify.ntfy_url must be an https:// URL")
+        if bool(n.telegram_bot_token) != bool(n.telegram_chat_id):
+            raise ConfigError("notify.telegram_bot_token and notify.telegram_chat_id go together")
+        unknown_events = set(n.events) - {"pairing", "new_ip", "ban", "lockdown"}
+        if unknown_events:
+            raise ConfigError(f"unknown notify.events {sorted(unknown_events)}")
         if self.pairing.ttl_seconds < 30 or self.pairing.ttl_seconds > 3600:
             raise ConfigError("pairing.ttl_seconds must be between 30 and 3600")
         if not (1 <= self.pairing.max_attempts <= 10):
@@ -275,7 +295,7 @@ def _apply(section_obj: typing.Any, data: dict, section: str) -> None:
         setattr(section_obj, key, _coerce(value, hints[key], f"{section}.{key}"))
 
 
-SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "bans", "logging")
+SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "bans", "notify", "logging")
 
 
 def load_config(path: Path | None = None, env: typing.Mapping[str, str] | None = None) -> Config:
@@ -301,5 +321,8 @@ def load_config(path: Path | None = None, env: typing.Mapping[str, str] | None =
         if section not in SECTIONS:
             raise ConfigError(f"unknown config section in env var {name}")
         _apply(getattr(cfg, section), {key: value}, section)
+    if cfg.network.mode == "cloudflare" and not cfg.network.trusted_proxies:
+        # A local cloudflared connects over loopback; trust it (and only it).
+        cfg.network.trusted_proxies = ["127.0.0.1/32", "::1/128"]
     cfg.validate()
     return cfg
