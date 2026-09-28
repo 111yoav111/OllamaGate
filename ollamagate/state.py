@@ -105,6 +105,16 @@ class RequestLogEntry:
     duration_ms: int
     bytes_out: int
     outcome: str  # complete | client_disconnect | killed | upstream_error
+    model: str = ""
+
+
+@dataclass
+class UsageDay:
+    """Daily usage rollup for one device (tokens are filled in from Phase 4)."""
+
+    requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 @dataclass
@@ -115,6 +125,8 @@ class ActiveStream:
     path: str
     started_at: float
     token_hash: str = ""  # which credential opened it (matters during rotation grace)
+    model: str = ""
+    bytes_out: int = 0
     killed: asyncio.Event = field(default_factory=asyncio.Event)
     kill_reason: str = ""
 
@@ -147,6 +159,10 @@ class State:
         self.audit_suppressed = 0
         self.started_at = time.time()
         self.version = 0
+        # Lockdown: reject all proxied traffic and pairing, but keep every device.
+        self.lockdown = False
+        # (device_id, "YYYY-MM-DD") -> usage for that local day
+        self.usage: dict[tuple[str, str], UsageDay] = {}
 
     def _changed(self) -> None:
         self.version += 1
@@ -177,6 +193,36 @@ class State:
 
     def log_request(self, entry: RequestLogEntry) -> None:
         self.request_log.append(entry)
+        self.usage_for(entry.device_id).requests += 1
+        self._changed()
+
+    def usage_for(self, device_id: str, day: str | None = None) -> UsageDay:
+        day = day or time.strftime("%Y-%m-%d")
+        return self.usage.setdefault((device_id, day), UsageDay())
+
+    def usage_total(self, device_id: str, prefix: str = "") -> UsageDay:
+        """Sum usage over days starting with ``prefix`` ("" = all, "2026-09" = a month)."""
+        total = UsageDay()
+        for (dev, day), u in self.usage.items():
+            if dev == device_id and day.startswith(prefix):
+                total.requests += u.requests
+                total.prompt_tokens += u.prompt_tokens
+                total.completion_tokens += u.completion_tokens
+        return total
+
+    def requests_last_minute(self, now: float | None = None) -> int:
+        cutoff = (time.time() if now is None else now) - 60
+        count = 0
+        for entry in reversed(self.request_log):
+            if entry.ts < cutoff:
+                break
+            count += 1
+        return count
+
+    def set_lockdown(self, on: bool) -> None:
+        self.lockdown = on
+        if on:
+            self.kill_all_streams("lockdown")
         self._changed()
 
     # ----- devices -------------------------------------------------------------

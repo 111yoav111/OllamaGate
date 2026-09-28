@@ -163,6 +163,7 @@ class ProxyStreamResponse(Response):
                 if self.on_chunk is not None:
                     self.on_chunk(chunk)
                 self.bytes_out += len(chunk)
+                self.stream.bytes_out = self.bytes_out
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
         except httpx.HTTPError as exc:
             log.warning("upstream stream error: %s", type(exc).__name__)
