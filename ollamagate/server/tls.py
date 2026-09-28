@@ -25,7 +25,11 @@ def _write_private(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` readable by the owner only (0600 on POSIX)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        tmp.unlink()  # a stale temp file could carry looser permissions
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.write(fd, data)
     finally:
@@ -68,15 +72,19 @@ def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> No
         )
         .sign(key, hashes.SHA256())
     )
-    _write_private(
-        key_path,
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        ),
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
     )
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    # Remove the old pair first: a crash midway then leaves "no cert", which
+    # triggers regeneration, never a mismatched key/cert pair.
+    for p in (cert_path, key_path):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+    _write_private(key_path, key_pem)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
@@ -107,6 +115,7 @@ def _needs_renewal(cert_path: Path, sans: list[str]) -> bool:
 def ensure_self_signed(tls_dir: Path, sans: list[str]) -> tuple[Path, Path]:
     """Return (cert, key) paths, generating or renewing the certificate if needed."""
     cert_path, key_path = tls_dir / CERT_NAME, tls_dir / KEY_NAME
+    tls_dir.mkdir(parents=True, exist_ok=True)
     if not key_path.exists() or _needs_renewal(cert_path, sans):
         generate_self_signed(cert_path, key_path, sans)
     return cert_path, key_path

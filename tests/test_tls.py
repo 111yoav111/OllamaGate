@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import sys
 
 import httpx
 
@@ -14,7 +15,7 @@ from .fake_ollama import make_fake_ollama
 def test_self_signed_generation_and_permissions(tmp_path):
     cert, key = tls.ensure_self_signed(tmp_path, ["localhost", "127.0.0.1"])
     assert cert.exists() and key.exists()
-    if hasattr(key, "stat"):
+    if sys.platform != "win32":  # POSIX modes don't apply on Windows
         assert key.stat().st_mode & 0o077 == 0
     fp = tls.cert_fingerprint(cert)
     assert len(fp) == 64
