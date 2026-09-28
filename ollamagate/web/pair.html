@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Pair device · OllamaGate</title>
+<link rel="stylesheet" href="/pair/pair.css">
+<script src="/pair/pair.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Pair this device</h1>
+
+  <form id="pair-form" autocomplete="off">
+    <label id="code-row">Pairing code
+      <input id="code" name="code" inputmode="text" autocapitalize="characters"
+             spellcheck="false" maxlength="9" placeholder="XXXX-XXXX">
+    </label>
+    <p id="link-note" hidden>Pairing link detected. Name this device to finish.</p>
+    <label>Device name
+      <input id="name" name="name" maxlength="64" placeholder="e.g. Anna's phone" required>
+    </label>
+    <button type="submit" id="submit">Pair</button>
+    <p id="error" role="alert" hidden></p>
+  </form>
+
+  <section id="done" hidden>
+    <h2>Paired ✓</h2>
+    <p>This is your device token. It is shown <strong>only once</strong> — copy it now
+       into your app (Open WebUI, Enchanted, scripts…) as
+       <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+    <div class="token-row">
+      <input id="token" readonly>
+      <button type="button" id="copy">Copy</button>
+    </div>
+    <dl>
+      <dt>Server URL</dt><dd><code id="base-url"></code></dd>
+      <dt>Ollama API</dt><dd><code id="api-url"></code></dd>
+      <dt>OpenAI API</dt><dd><code id="v1-url"></code></dd>
+      <dt>Certificate SHA-256</dt><dd><code id="fp"></code></dd>
+    </dl>
+    <p class="note">Apps that support certificate pinning can pin the SHA-256 fingerprint above.
+       Compare it with the one shown on the server's screen.</p>
+  </section>
+</main>
+</body>
+</html>
