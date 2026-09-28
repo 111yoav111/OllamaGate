@@ -12,7 +12,7 @@ someone who knows the address, scans for Ollama, or sniffs the network.
 **Assets:** the models and GPU time, the prompts/responses of paired devices,
 and the host machine itself.
 
-## What's protected (Phase 1)
+## What's protected (Phases 1-2)
 
 - **No anonymous access.** Every route except `/healthz` requires a device token.
   Requests to `/api/*` and `/v1/*` without a valid token get a generic `401`
@@ -47,6 +47,22 @@ and the host machine itself.
 - **Security headers.** `nosniff`, `X-Frame-Options: DENY`, a `default-src 'none'`
   CSP, `no-referrer`, `no-store`, and HSTS when TLS is on.
 - **Audit log.** Bounded ring buffer; long fields (paths, user agents) are truncated.
+- **Pairing.** Closed by default; while closed every `/pair*` route is an
+  ordinary `404`. A window lasts 5 minutes, pairs exactly one device and
+  self-destructs after 5 wrong attempts. Code: 8 Crockford base32 characters
+  (40 bits, safe given the attempt cap and TTL). QR and link: separate 128-bit
+  secrets carried in the URL **fragment**, so they never reach server logs or
+  `Referer` headers; the page removes them from the address bar. Only SHA-256
+  hashes of the secrets are kept, compared in constant time. Claims are
+  rate-limited per IP (10/min), must be same-origin JSON (no cross-site form
+  posts), and every open/fail/success/expiry is audited with IP and user agent.
+  Device names are stripped of control and bidi characters.
+- **Pairing links carry the certificate fingerprint** (`fp=`); the pairing page
+  warns if the certificate it received doesn't match.
+- **Admin channel.** CLI administration uses a `0600` Unix socket in a `0700`
+  directory (Windows: `127.0.0.1` on a random port) *and* a 256-bit secret from
+  an owner-only file, compared in constant time. There is no remote admin API.
+  Admin actions are audited. Device views never include token hashes.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
@@ -54,9 +70,8 @@ and the host machine itself.
 
 - Brute-force auto-bans, per-device rate limits and token quotas (Phase 4).
   Until then, repeated failed logins are only recorded in the audit log.
-- Pairing flows and their rate limits (Phase 2).
-- The `--dev-token` flag (loopback only, 24 h expiry) prints a token to the
-  terminal; it exists for development and will be removed once pairing exists.
+- Browser cookie sessions and CSRF tokens arrive with the `/app` chat UI
+  (Phase 4); until then browsers only display the token for use in apps.
 - Ollama error bodies and `/api/show` output are passed through unchanged and
   may reveal local file paths of model files to paired devices.
 
@@ -67,6 +82,12 @@ and the host machine itself.
 - On Windows, POSIX file modes don't apply; the key relies on the per-user
   profile directory ACLs.
 - All state is in memory by design: a restart revokes every device.
+- `ollamagate devices rotate` prints the new token on the owner's terminal; it
+  must be delivered to the device out of band.
+- The admin channel writes two runtime files (`run/admin.json`, `run/admin.sock`)
+  that are removed on shutdown. They exist only because CLI commands need to
+  reach the in-memory state of the running server.
+- Anyone who can act as your OS user can administer OllamaGate (by design).
 
 ## Reporting
 
