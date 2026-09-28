@@ -242,7 +242,7 @@ async def test_settings_tab_changes_runtime_setting():
     admin = make_admin()
     app = GateTUI(admin)
     async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         app.query_one("#set-pairing-ttl_seconds").value = "120"
         await pilot.click("#save-pairing-ttl_seconds")
         await pilot.pause()
@@ -378,7 +378,7 @@ async def test_settings_tab_reflects_cli_changes():
     admin = make_admin()
     app = GateTUI(admin)
     async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         admin.set_setting("pairing.max_attempts", 3)  # e.g. via `ollamagate settings set`
         assert await until(pilot, lambda: app._q("#set-pairing-max_attempts").value == "3")
 
@@ -392,3 +392,58 @@ async def test_unexpected_error_in_action_does_not_kill_tui(monkeypatch):
         await pilot.press("2", "k", "y")
         await pilot.pause()
         assert app.is_running
+
+
+# ----- Phase 4: limits editor, bans --------------------------------------------------------
+
+
+async def test_limits_screen_edits_quotas_models_and_priority():
+    admin = make_admin()
+    device_id = add_device(admin.state)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 60)) as pilot:
+        await pilot.press("2", "l")
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#lim-tokens_per_day").value = "5000"
+        screen.query_one("#lim-allowed_models").value = "llama3, qwen2:7b"
+        screen.query_one("#lim-priority").value = "high"
+        await pilot.click("#apply")
+        await pilot.pause()
+        lim = admin.state.get_device(device_id).limits
+        assert lim.tokens_per_day == 5000 and lim.allowed_models == ["llama3", "qwen2:7b"] and lim.priority == "high"
+        assert lim.requests_per_minute == 60  # untouched
+        await pilot.press("l")
+        await pilot.pause()
+        app.screen.query_one("#lim-max_concurrent").value = "abc"
+        await pilot.click("#apply")
+        await pilot.pause()
+        assert admin.state.get_device(device_id).limits.max_concurrent == 2
+        await shot(app, "limits")
+
+
+async def test_ban_device_ip_and_unban_from_bans_tab():
+    admin = make_admin()
+    add_device(admin.state)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("2", "b")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert admin.state.bans.banned("203.0.113.7") is not None
+        await pilot.press("5")
+        await pilot.pause()
+        assert app._q("#ban-table").row_count == 1
+        await shot(app, "bans")
+        await pilot.press("u", "y")
+        await pilot.pause()
+        assert admin.state.bans.banned("203.0.113.7") is None
+
+
+async def test_auto_ban_toast():
+    admin = make_admin()
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45), notifications=True) as pilot:
+        admin.state.audit("ban_auto", ip="198.51.100.9", reason="failed logins", strikes=1, until=0)
+        assert await until(pilot, lambda: any("198.51.100.9" in n.message for n in app._notifications))

@@ -100,6 +100,10 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         await record(request)
         return JSONResponse({"models": [{"name": "llama3:8b"}, {"name": "qwen2:7b"}]})
 
+    async def openai_models(request: Request):
+        await record(request)
+        return JSONResponse({"object": "list", "data": [{"id": "llama3:8b"}, {"id": "qwen2:7b"}]})
+
     async def version(request: Request):
         await record(request)
         return JSONResponse({"version": "0.0.0-fake"}, headers={"x-upstream-secret": "leak"})
@@ -139,6 +143,7 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         Route("/api/generate", chat, methods=["POST"]),
         Route("/v1/chat/completions", openai_chat, methods=["POST"]),
         Route("/api/tags", tags, methods=["GET"]),
+        Route("/v1/models", openai_models, methods=["GET"]),
         Route("/api/version", version, methods=["GET"]),
         Route("/api/pull", generic, methods=["POST"]),
         Route("/api/show", broken_json, methods=["POST"]),
