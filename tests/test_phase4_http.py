@@ -113,12 +113,16 @@ def test_policy_rejects_bad_json(gate, client):
 def test_auto_ban_through_trusted_proxy(gate_factory, client):
     gate = gate_factory(**{"network__trusted_proxies": ["127.0.0.1/32"], "bans__failures": 5})
     attacker = {XFF: "198.51.100.66"}
-    for _ in range(5):
-        assert client.get(gate.url + "/api/tags", headers={**attacker, "Authorization": "Bearer og_dev_nope"}).status_code == 401
-    # Now everything is refused for that client, even with a valid token and /healthz...
-    assert client.get(gate.url + "/api/tags", headers={**attacker, **bearer(gate.token)}).status_code == 403
+    for i in range(5):  # five *different* wrong tokens: guessing
+        r = client.get(gate.url + "/api/tags", headers={**attacker, "Authorization": f"Bearer og_dev_guess{i}"})
+        assert r.status_code == 401
+    # Now that client is refused everywhere (even /healthz) unless it has a valid token:
+    # a paired device sharing the attacker's IP (NAT) keeps working.
+    assert client.get(gate.url + "/api/tags", headers={**attacker, "Authorization": "Bearer og_dev_x"}).status_code == 403
     assert client.get(gate.url + "/healthz", headers=attacker).status_code == 403
-    # ...but not for anyone else.
+    assert client.get(gate.url + "/pair", headers=attacker).status_code == 403
+    assert client.get(gate.url + "/api/tags", headers={**attacker, **bearer(gate.token)}).status_code == 200
+    # Nobody else is affected.
     assert client.get(gate.url + "/api/tags", headers={XFF: "198.51.100.67", **bearer(gate.token)}).status_code == 200
     assert any(e.event == "ban_auto" for e in gate.state.audit_log)
 
@@ -128,8 +132,8 @@ def test_failed_pairing_attempts_count_towards_bans(gate_factory, client):
 
     gate = gate_factory(**{"network__trusted_proxies": ["127.0.0.1/32"], "bans__failures": 3})
     gate.call(lambda: pairing.open_window(gate.state, base_url=gate.url, fingerprint=None, ttl_seconds=60, max_attempts=10))
-    for _ in range(3):
-        client.post(gate.url + "/pair/claim", headers={XFF: "198.51.100.70"}, json={"code": "ZZZZ-ZZZZ", "device_name": "x"})
+    for code in ("ZZZZ-ZZZ1", "ZZZZ-ZZZ2", "ZZZZ-ZZZ3"):
+        client.post(gate.url + "/pair/claim", headers={XFF: "198.51.100.70"}, json={"code": code, "device_name": "x"})
     assert client.get(gate.url + "/pair", headers={XFF: "198.51.100.70"}).status_code == 403
 
 
@@ -196,3 +200,94 @@ def test_priority_queue_end_to_end(gate_factory, client):
     t_high.join(10)
     served = [req["body"]["model"] for req in gate.recorder.requests if req["body"]["model"] in ("low", "high")]
     assert served == ["high", "low"]
+
+
+# ----- Phase 4 council regressions --------------------------------------------------------
+
+
+def test_anonymous_requests_cannot_get_a_client_banned(gate_factory, client):
+    """A web page can make visitors' browsers send anonymous requests; those must not ban."""
+    gate = gate_factory(**{"network__trusted_proxies": ["127.0.0.1/32"], "bans__failures": 3})
+    victim = {XFF: "198.51.100.77"}
+    for _ in range(20):
+        assert client.get(gate.url + "/api/tags", headers=victim).status_code == 401
+    assert gate.state.bans.banned("198.51.100.77") is None
+
+
+def test_stale_token_after_restart_does_not_ban(gate_factory, client):
+    """A device polling with its pre-restart token repeats one credential: not guessing."""
+    gate = gate_factory(**{"network__trusted_proxies": ["127.0.0.1/32"], "bans__failures": 3})
+    stale = {XFF: "198.51.100.78", "Authorization": "Bearer og_dev_" + "s" * 43}
+    for _ in range(20):
+        assert client.get(gate.url + "/api/tags", headers=stale).status_code == 401
+    assert gate.state.bans.banned("198.51.100.78") is None
+    assert client.get(gate.url + "/pair", headers={XFF: "198.51.100.78"}).status_code == 404  # can pair again
+
+
+def test_case_variant_keys_are_rejected(gate, client):
+    """Ollama's Go decoder folds key case; "MODEL" must not sneak past the allowlist."""
+    set_limits(gate, allowed_models=["llama3:8b"], max_num_predict=64)
+    for body in (
+        {"model": "llama3:8b", "MODEL": "qwen2:7b", "stream": False},
+        {"model": "llama3:8b", "options": {"num_predict": 10, "Num_Predict": -1}},
+        {"model": "llama3:8b", "Keep_Alive": -1},
+        {"model": "llama3:8b", "ſtream": True},  # Unicode folding: long s == s
+    ):
+        r = client.post(gate.url + "/api/chat", headers=bearer(gate.token), json=body)
+        assert r.status_code == 400, body
+    r = client.post(gate.url + "/v1/chat/completions", headers=bearer(gate.token),
+                    json={"model": "llama3:8b", "stream": True, "stream_options": {"Include_Usage": False}})
+    assert r.status_code == 400
+    assert gate.recorder.requests == []
+
+
+def test_num_ctx_only_clamped_when_requested(gate, client):
+    set_limits(gate, max_num_ctx=1024)
+    client.post(gate.url + "/api/chat", headers=bearer(gate.token),
+                json={"model": "m", "stream": False, "options": {"num_ctx": 131072}})
+    assert gate.recorder.last["body"]["options"] == {"num_ctx": 1024, "num_predict": 4096}
+    client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m", "stream": False})
+    assert gate.recorder.last["body"]["options"] == {"num_predict": 4096}  # Ollama's own num_ctx applies
+
+
+def test_output_capped_to_remaining_quota(gate, client):
+    set_limits(gate, tokens_per_day=100, max_num_predict=4096)
+    client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m", "stream": False, "fake_chunks": 3})
+    assert wait_for(lambda: gate.state.usage_today(gate.device.id).completion_tokens == 3)
+    client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m", "stream": False})
+    assert gate.recorder.last["body"]["options"]["num_predict"] == 100 - 10  # 7 prompt + 3 output used
+
+
+def test_me_reports_device_limits(gate, client):
+    set_limits(gate, tokens_per_day=4242, priority="high")
+    lim = client.get(gate.url + "/me", headers=bearer(gate.token)).json()["limits"]
+    assert lim["tokens_per_day"] == 4242 and lim["priority"] == "high"
+
+
+def test_queue_timeout_returns_503(gate_factory, client):
+    import httpx
+
+    gate = gate_factory(**{"server__max_upstream_concurrency": 1, "server__queue_timeout": 0.5})
+    with client.stream("POST", gate.url + "/api/chat", headers=bearer(gate.token),
+                       json={"model": "hold", "fake_chunks": 40, "fake_delay": 0.05}) as r:
+        lines = r.iter_lines()
+        next(lines)
+        other, _ = gate.new_device("other")
+        started = time.monotonic()
+        busy = httpx.post(gate.url + "/api/chat", headers=bearer(other), json={"model": "m", "stream": False})
+        assert busy.status_code == 503 and busy.headers["retry-after"] == "10"
+        assert time.monotonic() - started < 3
+        assert gate.app.state.priority_gate.queued == 0
+
+
+def test_cloudflare_mode_requires_trusted_proxies():
+    import pytest
+
+    from ollamagate.config import Config, ConfigError
+
+    cfg = Config()
+    cfg.network.mode = "cloudflare"
+    with pytest.raises(ConfigError, match="trusted_proxies"):
+        cfg.validate()
+    cfg.network.trusted_proxies = ["127.0.0.1/32"]
+    cfg.validate()

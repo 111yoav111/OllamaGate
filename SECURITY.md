@@ -98,25 +98,35 @@ and the host machine itself.
   before authentication - `/healthz` included, so the host doesn't even look
   alive - cuts all streams and refuses pairing while keeping all devices.
 - **Runtime settings** are limited to a small allowlist (public URL, pairing
-  TTL/attempts, default concurrency, default model-management grant), are
+  TTL/attempts, and the concurrency / model-management defaults for devices
+  paired from then on - existing devices keep their own limits), are
   validated like the config file, audited, and never written to disk.
   `server.public_url` must be `https://host[:port]` (plain `http` only for
   loopback) with no path, query, fragment or credentials, since it is embedded
   in pairing links and QR codes.
 - **Per-device limits.** Token quotas (day/month), requests per minute and
   concurrency are enforced before anything reaches Ollama (`429` +
-  `Retry-After`); `num_ctx`, `num_predict` / `max_tokens` and `keep_alive` are
-  clamped server-side; models outside a device's allowlist are refused and
-  hidden from listings. Token usage comes from Ollama's own counts, and
-  interrupted streams are charged an estimate so quotas can't be dodged by
-  disconnecting early. A global priority queue keeps one device from
+  `Retry-After`); `num_ctx` (when requested), `num_predict` / `max_tokens`
+  (always, and never more than the tokens left in a quota) and `keep_alive`
+  are clamped server-side; models outside a device's allowlist are refused and
+  hidden from listings (`/api/tags`, `/api/ps`, `/v1/models`; failing closed).
+  Because Ollama's Go JSON decoder matches keys case-insensitively, request
+  keys at the levels it decodes into structs must be plain lowercase - so
+  `"MODEL"` or `"ſtream"` can't smuggle a second value past the checks.
+  Token usage comes from Ollama's own counts, and interrupted streams are
+  charged an estimate so quotas can't be dodged by disconnecting early. A
+  global priority queue (with a wait limit) keeps one device from
   monopolising Ollama.
 - **Auto-bans.** Repeated failed logins or pairing attempts ban the client
-  (fail2ban-style, doubling on repeat, IPv6 per /64); banned clients are
-  refused before any routing, `/healthz` included. Loopback is never
-  auto-banned. A stale browser cookie (e.g. after a restart) does not count.
+  (fail2ban-style, doubling on repeat, IPv6 per /64). Only *distinct* wrong
+  bearer tokens / pairing codes count: anonymous requests don't (any website
+  can make its visitors send those, which would turn bans into a weapon), and
+  neither does a device retrying its old token after a restart. Banned clients
+  are refused before any routing, `/healthz` included - unless the request
+  carries a valid device credential, so paired devices behind the same NAT as
+  an attacker keep working. Loopback is never auto-banned.
 - **Browser chat (`/app`).** A browser that pairs gets an `HttpOnly`, `Secure`,
-  `SameSite=Strict` session cookie holding its device token. Cookie-authenticated
+  `SameSite=Strict`, `__Host-` session cookie holding its device token. Cookie-authenticated
   requests must also carry a CSRF header (an HMAC of the token under a
   per-process key), which cross-site pages can neither read nor forge; there is
   no CORS. `/app` and its assets require a valid session (generic `401`

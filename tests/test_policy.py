@@ -33,7 +33,7 @@ def test_clamps_native_options():
 
 def test_sets_missing_limits_and_keeps_lower_values():
     data = json.loads(apply_body_policy(LIM, "/api/generate", body(model="m", stream=False)).body)
-    assert data["options"] == {"num_ctx": 4096, "num_predict": 512}
+    assert data["options"] == {"num_predict": 512}  # num_ctx is left to Ollama unless asked for
     data = json.loads(apply_body_policy(LIM, "/api/chat", body(model="m", options={"num_ctx": 2048, "num_predict": 10})).body)
     assert data["options"] == {"num_ctx": 2048, "num_predict": 10}
 
@@ -217,3 +217,97 @@ def test_manual_ban_and_unban():
     bans.ban("203.0.113.9", "manual", None)
     assert bans.banned("203.0.113.9", now=10**12) is not None  # until lifted
     assert bans.unban("203.0.113.9") and bans.banned("203.0.113.9") is None
+
+
+# ----- Phase 4 council regressions --------------------------------------------------------
+
+
+def test_repeating_the_same_credential_does_not_ban():
+    bans = BanList(threshold=3)
+    for _ in range(20):
+        assert bans.record_failure("198.51.100.3", "x", fingerprint="same-old-token") is None
+    assert bans.record_failure("198.51.100.3", "x", fingerprint="a") is None  # 2 distinct
+    assert bans.record_failure("198.51.100.3", "x", fingerprint="b") is not None  # 3 distinct
+
+
+def test_escalation_reaches_the_maximum():
+    """Strike memory counts from the end of a ban, so long bans keep escalating."""
+    bans = BanList(threshold=1, ban_seconds=3600, max_ban_seconds=7 * 86400)
+    now, durations = 0.0, []
+    for _ in range(10):
+        ban = bans.record_failure("198.51.100.4", "x", now=now)
+        durations.append(ban.until - ban.created_at)
+        now = ban.until + 1  # re-offend right after the ban ends
+    assert durations[:6] == [3600 * 2**i for i in range(6)]
+    assert durations[-1] == 7 * 86400
+
+
+def test_slot_granted_then_cancelled_is_released_via_ticket():
+    from ollamagate.server.queue import Ticket
+
+    async def run():
+        gate = PriorityGate(1)
+        first = Ticket()
+        await gate.acquire("normal", first)
+        second = Ticket()
+        waiter = asyncio.create_task(gate.acquire("normal", second))
+        await asyncio.sleep(0)
+        gate.release(first)  # grants the slot to the waiter...
+        waiter.cancel()  # ...which is cancelled before it resumes
+        await asyncio.gather(waiter, return_exceptions=True)
+        assert second.held  # it still owns the slot
+        gate.release(second)
+        gate.release(second)  # releasing twice is a no-op
+        return gate.active, gate.queued
+
+    assert asyncio.run(run()) == (0, 0)
+
+
+def test_remaining_quota_caps_output():
+    r = apply_body_policy(LIM, "/api/chat", body(model="m"), remaining_tokens=50)
+    assert json.loads(r.body)["options"]["num_predict"] == 50
+    r = apply_body_policy(DeviceLimits(max_num_predict=0), "/v1/completions", body(model="m"), remaining_tokens=0)
+    assert json.loads(r.body)["max_tokens"] == 1
+
+
+def test_uppercase_or_folded_keys_rejected():
+    for bad in (
+        body(model="m", MODEL="x"),
+        body(model="m", options={"NUM_CTX": 1}),
+        body(model="m", stream_options={"Include_Usage": False}),
+        body(model="m", **{"ſtream": True}),
+    ):
+        assert apply_body_policy(LIM, "/api/chat", bad).status == 400
+
+
+def test_filter_model_list_fails_closed():
+    lim = DeviceLimits(allowed_models=["llama3:8b"])
+    assert json.loads(filter_model_list(lim, "/api/tags", b"garbage")) == {"models": []}
+    assert json.loads(filter_model_list(lim, "/v1/models", b'{"data": "nope"}')) == {"data": []}
+    ps = body(models=[{"name": "llama3:8b"}, {"name": "qwen2:7b"}])
+    assert [m["name"] for m in json.loads(filter_model_list(lim, "/api/ps", ps))["models"]] == ["llama3:8b"]
+
+
+def test_large_non_streamed_body_still_counted_exactly():
+    c = UsageCounter("application/json", 10)
+    c.feed(b'{"model":"m","embeddings":[[' + b"0.123," * 100_000 + b'0.1]],"prompt_eval_count":42}')
+    u = c.result()
+    assert u.exact and u.prompt_tokens == 42
+
+
+def test_rpm_retry_after_after_limit_lowered():
+    from ollamagate.ratelimit import RateLimiter
+
+    rl = RateLimiter(60, 60.0)
+    for i in range(10):
+        rl.hit("d", now=float(i))  # hits at t=0..9
+    # Limit lowered to 3: the oldest hit that blocks is at t=7 (10 - 3), expiring at 67.
+    assert rl.retry_after("d", now=10.0, limit=3) == 58
+
+
+def test_embeddings_num_ctx_clamped_only_when_given():
+    lim = DeviceLimits(max_num_ctx=1024)
+    r = apply_body_policy(lim, "/api/embed", body(model="m", input="x", options={"num_ctx": 131072}))
+    assert json.loads(r.body)["options"] == {"num_ctx": 1024}
+    raw = body(model="m", input="x")
+    assert apply_body_policy(lim, "/api/embed", raw).body is raw  # untouched: Ollama's default applies
