@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import signal
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import uvicorn
 from fastapi import FastAPI
@@ -52,6 +56,26 @@ class GateServer(uvicorn.Server):
     async def shutdown(self, sockets: list | None = None) -> None:  # type: ignore[override]
         self.gate_state.kill_all_streams("server shutting down")
         await super().shutdown(sockets)
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        """Like uvicorn's, but don't re-raise the signal afterwards.
+
+        uvicorn re-raises SIGINT/SIGTERM once serving stops, which kills the
+        process before our own cleanup (removing the admin socket) can run.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+        signals = [signal.SIGINT, signal.SIGTERM]
+        if hasattr(signal, "SIGBREAK"):  # Windows Ctrl+Break
+            signals.append(signal.SIGBREAK)
+        original = {sig: signal.signal(sig, self.handle_exit) for sig in signals}
+        try:
+            yield
+        finally:
+            for sig, handler in original.items():
+                signal.signal(sig, handler)
 
 
 def build_uvicorn_config(config: Config, app: FastAPI, tls_info: TLSInfo | None) -> uvicorn.Config:
