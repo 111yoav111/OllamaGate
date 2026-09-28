@@ -1,0 +1,81 @@
+"""Device token generation and verification.
+
+Tokens look like ``og_dev_<43 base64url chars>`` (256 random bits). Only the
+SHA-256 hash and a short, non-secret display prefix are ever stored.
+"""
+
+from __future__ import annotations
+
+import enum
+import hashlib
+import hmac
+import secrets
+import time
+from dataclasses import dataclass
+from typing import Mapping
+
+from ..state import Device, DeviceStatus, State
+
+TOKEN_PREFIX = "og_dev_"
+TOKEN_BYTES = 32
+# Upper bound on what we even bother hashing; real tokens are 50 chars.
+MAX_TOKEN_LEN = 128
+
+
+def new_device_token() -> str:
+    return TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES)
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def display_prefix(token: str) -> str:
+    """Non-secret prefix for display, e.g. ``og_dev_ab12…`` (24 bits of the secret)."""
+    return token[: len(TOKEN_PREFIX) + 4] + "…"
+
+
+def extract_bearer(headers: Mapping[str, str]) -> str | None:
+    value = headers.get("authorization")
+    if not value:
+        return None
+    scheme, _, token = value.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
+
+
+class AuthResult(enum.Enum):
+    OK = "ok"
+    MISSING = "missing"
+    INVALID = "invalid"
+    EXPIRED = "expired"
+    SUSPENDED = "suspended"
+
+
+@dataclass
+class AuthOutcome:
+    result: AuthResult
+    device: Device | None = None
+
+
+def authenticate(state: State, token: str | None, now: float | None = None) -> AuthOutcome:
+    if not token:
+        return AuthOutcome(AuthResult.MISSING)
+    if len(token) > MAX_TOKEN_LEN or not token.startswith(TOKEN_PREFIX):
+        return AuthOutcome(AuthResult.INVALID)
+    token_hash = hash_token(token)
+    device = state.device_by_token_hash(token_hash)
+    # The lookup is keyed by a hash of a 256-bit secret, so its timing leaks nothing
+    # useful; the explicit constant-time compare keeps the check obviously correct.
+    if device is None or not hmac.compare_digest(device.token_hash, token_hash):
+        return AuthOutcome(AuthResult.INVALID)
+    if device.status == DeviceStatus.REVOKED:
+        return AuthOutcome(AuthResult.INVALID)
+    now = time.time() if now is None else now
+    if device.token_expires_at is not None and now >= device.token_expires_at:
+        return AuthOutcome(AuthResult.EXPIRED, device)
+    if device.status == DeviceStatus.SUSPENDED:
+        return AuthOutcome(AuthResult.SUSPENDED, device)
+    return AuthOutcome(AuthResult.OK, device)
