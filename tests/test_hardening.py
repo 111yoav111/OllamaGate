@@ -70,8 +70,8 @@ def test_per_ip_connection_cap(gate_factory):
         try:
             extra.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
             assert extra.recv(4096) == b""  # refused
-        except ConnectionResetError:
-            pass  # also refused
+        except ConnectionError:
+            pass  # also refused (reset on Linux, aborted on Windows)
         finally:
             extra.close()
     finally:
