@@ -5,7 +5,6 @@
   // The secret travels in the URL fragment so it never reaches any server log.
   const params = new URLSearchParams(window.location.hash.slice(1));
   const linkSecret = params.get("t");
-  const expectedFp = params.get("fp");
   if (window.location.hash) {
     // Remove the secret from the address bar and history.
     history.replaceState(null, "", window.location.pathname);
@@ -13,6 +12,15 @@
   if (linkSecret) {
     $("code-row").hidden = true;
     $("link-note").hidden = false;
+  }
+  $("name").value = guessDeviceName(navigator.userAgent);
+
+  function guessDeviceName(ua) {
+    const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+      : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+    const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome"
+      : /Safari\//.test(ua) ? "Safari" : "";
+    return [os, browser].filter(Boolean).join(" ") || "";
   }
 
   function showError(msg) {
@@ -46,6 +54,12 @@
       $("submit").disabled = false;
       if (res.status === 404) return showError("No pairing window is open. Ask the owner to open one.");
       if (res.status === 429) return showError("Too many attempts. Wait a minute and try again.");
+      if (res.status === 403 && linkSecret) {
+        return showError("This pairing link is no longer valid. Ask the owner for a new one.");
+      }
+      if (res.status === 403) {
+        return showError("Wrong code (" + (data.attempts_left ?? 0) + " attempts left).");
+      }
       return showError(data.error || "Pairing failed.");
     }
     $("pair-form").hidden = true;
@@ -55,9 +69,6 @@
     $("api-url").textContent = data.base_url + "/api";
     $("v1-url").textContent = data.base_url + "/v1";
     $("fp").textContent = data.fingerprint || "(not using a self-signed certificate)";
-    if (expectedFp && data.fingerprint && expectedFp.toLowerCase() !== data.fingerprint.toLowerCase()) {
-      $("fp-warn").hidden = false;
-    }
   });
 
   $("copy").addEventListener("click", async () => {
