@@ -84,6 +84,7 @@ class AuthResult(enum.Enum):
     INVALID = "invalid"
     EXPIRED = "expired"
     SUSPENDED = "suspended"
+    NO_CERT = "no_cert"  # right token, but not over the device's own client certificate
 
 
 @dataclass
@@ -92,7 +93,11 @@ class AuthOutcome:
     device: Device | None = None
 
 
-def authenticate(state: State, token: str | None, now: float | None = None) -> AuthOutcome:
+def authenticate(
+    state: State, token: str | None, now: float | None = None, client_cert: str | None = None
+) -> AuthOutcome:
+    """Check a device token. ``client_cert`` is the SHA-256 of the TLS client
+    certificate the request came over (see protocol.CLIENT_CERT_SCOPE)."""
     if not token:
         return AuthOutcome(AuthResult.MISSING)
     if len(token) > MAX_TOKEN_LEN or not token.startswith(TOKEN_PREFIX):
@@ -112,6 +117,12 @@ def authenticate(state: State, token: str | None, now: float | None = None) -> A
     )
     if not (current or previous):
         return AuthOutcome(AuthResult.INVALID)
+    # mTLS: a device that was issued a certificate must always present it, so a
+    # leaked token alone is useless. Checked before expiry/suspension on purpose.
+    if device.client_cert_fp is not None and not hmac.compare_digest(
+        device.client_cert_fp, client_cert or ""
+    ):
+        return AuthOutcome(AuthResult.NO_CERT, device)
     if device.token_expires_at is not None and now >= device.token_expires_at:
         return AuthOutcome(AuthResult.EXPIRED, device)
     if device.status == DeviceStatus.SUSPENDED:

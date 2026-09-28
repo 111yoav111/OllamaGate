@@ -27,6 +27,8 @@ from ..textsafe import safe_text
 from . import auth, pairing
 from .body import BodyTooLarge, read_body_limited
 from .netutil import parse_networks, resolve_client_ip
+from .protocol import CLIENT_CERT_SCOPE
+from .tls import ClientCA
 from .app_routes import register_app_routes
 from .pairing_routes import register_pairing_routes
 from .policy import (
@@ -134,7 +136,7 @@ class BanMiddleware:
     def _has_valid_credential(self, scope: Scope) -> bool:
         request = Request(scope)
         token = auth.extract_bearer(request.headers) or request.cookies.get(auth.SESSION_COOKIE)
-        return auth.authenticate(self.state, token).result is auth.AuthResult.OK
+        return auth.authenticate(self.state, token, client_cert=scope.get(CLIENT_CERT_SCOPE)).result is auth.AuthResult.OK
 
 
 class SecurityHeadersMiddleware:
@@ -175,8 +177,11 @@ def create_app(
     *,
     fingerprint: str | None = None,
     upstream_transport: httpx.AsyncBaseTransport | None = None,
+    client_ca: ClientCA | None = None,
 ) -> FastAPI:
     trusted = parse_networks(config.network.trusted_proxies)
+    if client_ca is not None:
+        state.on_pairing_change = client_ca.set_pairing_open
     b = config.bans
     state.bans.configure(b.failures, b.window_seconds, b.ban_seconds, b.max_ban_seconds)
 
@@ -260,7 +265,8 @@ def create_app(
         """Lets a device see what the server knows about it."""
         if state.lockdown:
             return lockdown_response()
-        outcome = auth.authenticate(state, auth.extract_credential(request.headers, request.cookies, state.csrf_key)[0])
+        token = auth.extract_credential(request.headers, request.cookies, state.csrf_key)[0]
+        outcome = auth.authenticate(state, token, client_cert=request.scope.get(CLIENT_CERT_SCOPE))
         if outcome.result is not auth.AuthResult.OK or outcome.device is None:
             state.audit_noisy("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
             return unauthorized()
@@ -278,7 +284,7 @@ def create_app(
             }
         )
 
-    register_pairing_routes(app, config, state, fingerprint, client_ip, record_failure)
+    register_pairing_routes(app, config, state, fingerprint, client_ip, record_failure, client_ca)
     register_app_routes(app, state, unauthorized)
 
     gate = PriorityGate(config.server.max_upstream_concurrency)
@@ -309,7 +315,8 @@ def create_app(
             return lockdown_response()
 
         # 2. Authenticate.
-        outcome = auth.authenticate(state, token)
+        client_cert = request.scope.get(CLIENT_CERT_SCOPE)
+        outcome = auth.authenticate(state, token, client_cert=client_cert)
         if outcome.result is not auth.AuthResult.OK:
             state.audit_noisy(
                 "auth_failed",
@@ -319,6 +326,8 @@ def create_app(
                 path=path,
                 user_agent=request.headers.get("user-agent", ""),
             )
+            # NO_CERT doesn't count either: that caller had the right token (the audit
+            # entry with reason=no_cert shows the owner a token may have leaked).
             if outcome.result is auth.AuthResult.INVALID and not via_cookie:
                 # Only a wrong bearer token counts. Anonymous requests don't: any web
                 # page can make a visitor's browser send those (no-cors fetch, <img>),
@@ -410,7 +419,7 @@ def create_app(
 
             # 6. Re-check the credential: it may have been revoked, rotated,
             #    suspended or expired while the body was arriving.
-            recheck = auth.authenticate(state, token)
+            recheck = auth.authenticate(state, token, client_cert=client_cert)
             if recheck.result is not auth.AuthResult.OK or recheck.device is not device:
                 finish("rejected", 401, 0)
                 return unauthorized()

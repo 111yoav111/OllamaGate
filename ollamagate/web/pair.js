@@ -69,6 +69,17 @@
     $("api-url").textContent = data.base_url + "/api";
     $("v1-url").textContent = data.base_url + "/v1";
     $("fp").textContent = data.fingerprint || "(not using a self-signed certificate)";
+    const cert = data.client_cert;
+    if (cert) {
+      // Built in the page from the one-time response; nothing is fetched again.
+      $("cert-p12").href = "data:application/x-pkcs12;base64," + cert.p12;
+      $("cert-pem").href = "data:application/x-pem-file;charset=utf-8," + encodeURIComponent(cert.cert_pem);
+      $("cert-key").href = "data:application/x-pem-file;charset=utf-8," + encodeURIComponent(cert.key_pem);
+      $("cert-pass").textContent = cert.p12_password;
+      $("cert").hidden = false;
+      // The chat in this browser needs the certificate installed first.
+      $("open-chat").textContent = "Install the certificate, then open chat in this browser →";
+    }
   });
 
   $("copy").addEventListener("click", async () => {

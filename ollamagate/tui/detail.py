@@ -92,6 +92,7 @@ class DeviceDetailScreen(Screen[None]):
             ("Token", t(d["token_prefix"])),
             ("Token expires", t(expires)),
             ("Token rotated", t(ts(d["token_rotated_at"]))),
+            ("Client cert", t(f"required (SHA-256 {d['client_cert']}…)" if d.get("client_cert") else "none")),
             ("Model management", t("allowed" if d["allow_model_management"] else "blocked")),
             ("Notes", t(d["notes"])),
         ]

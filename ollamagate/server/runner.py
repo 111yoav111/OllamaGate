@@ -79,7 +79,11 @@ class GateServer(uvicorn.Server):
 
 
 def build_uvicorn_config(
-    config: Config, app: FastAPI, tls_info: TLSInfo | None, own_logging: bool = True
+    config: Config,
+    app: FastAPI,
+    tls_info: TLSInfo | None,
+    own_logging: bool = True,
+    client_ca: tls.ClientCA | None = None,
 ) -> uvicorn.Config:
     protocol = make_guarded_protocol(
         header_timeout=config.server.header_timeout,
@@ -110,11 +114,20 @@ def build_uvicorn_config(
     uv_config.load()
     if tls_info:
         # Replace uvicorn's default context with our hardened one (TLS 1.2+, AEAD only).
-        uv_config.ssl = tls.build_server_context(tls_info.cert_path, tls_info.key_path)
+        uv_config.ssl = tls.build_server_context(
+            tls_info.cert_path, tls_info.key_path, client_ca.pem if client_ca else None
+        )
+        if client_ca is not None:
+            client_ca.context = uv_config.ssl
     return uv_config
 
 
 def build_server(
-    config: Config, app: FastAPI, state: State, tls_info: TLSInfo | None, own_logging: bool = True
+    config: Config,
+    app: FastAPI,
+    state: State,
+    tls_info: TLSInfo | None,
+    own_logging: bool = True,
+    client_ca: tls.ClientCA | None = None,
 ) -> GateServer:
-    return GateServer(build_uvicorn_config(config, app, tls_info, own_logging), state)
+    return GateServer(build_uvicorn_config(config, app, tls_info, own_logging, client_ca), state)

@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 from ..state import Device, DeviceLimits, PairingWindow, State, WindowState
 from . import auth
+from .tls import ClientCA, ClientCert
 
 # Crockford base32: no I, L, O, U, so 0/O and 1/I/L can't be confused.
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -118,6 +119,8 @@ def open_window(
         },
     )
     state.pairing_window = window
+    if state.on_pairing_change is not None:
+        state.on_pairing_change(True)
     state.audit("pairing_opened", window_id=window.id, methods=list(methods), ttl=ttl_seconds)
     return PairingSecrets(
         window_id=window.id,
@@ -135,6 +138,8 @@ def close_window(state: State, new_state: WindowState, reason: str = "") -> None
     window.state = new_state
     state.pairing_window = None
     state.pairing_history.append(window)
+    if state.on_pairing_change is not None:
+        state.on_pairing_change(False)
     if new_state is not WindowState.USED:
         state.audit(f"pairing_{new_state.value}", window_id=window.id, reason=reason, attempts=window.attempts)
 
@@ -163,6 +168,7 @@ class ClaimResult:
     device: Device | None = None
     token: str | None = None
     attempts_left: int = 0
+    client_cert: ClientCert | None = None
 
 
 def claim(
@@ -176,6 +182,7 @@ def claim(
     now: float | None = None,
     allow_model_management: bool = False,
     limits: "DeviceLimits | None" = None,
+    client_ca: ClientCA | None = None,
 ) -> ClaimResult:
     """Try to pair a device. ``kind`` is "code" (typed code) or "link" (URL secret).
 
@@ -220,6 +227,8 @@ def claim(
             close_window(state, WindowState.DESTROYED, reason="too many wrong attempts")
         return ClaimResult(ClaimError.INVALID, attempts_left=max(left, 0))
 
+    # Issue the certificate first: if that fails, no token-only device is left behind.
+    cert = client_ca.issue(name) if client_ca is not None else None
     token = auth.new_device_token()
     device = state.add_device(
         name=name,
@@ -229,10 +238,12 @@ def claim(
         allow_model_management=allow_model_management,
         limits=limits,
     )
+    if cert is not None:
+        device.client_cert_fp = cert.fingerprint
     state.touch_device(device, ip, None, ua)
     window.device_id = device.id
     close_window(state, WindowState.USED)
     state.audit(
         "pairing_succeeded", ip=ip, device_id=device.id, window_id=window.id, method=matched, user_agent=ua
     )
-    return ClaimResult(device=device, token=token)
+    return ClaimResult(device=device, token=token, client_cert=cert)

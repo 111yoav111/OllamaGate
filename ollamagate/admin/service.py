@@ -85,6 +85,7 @@ def device_view(device: Device, state: State) -> dict[str, Any]:
         "token_prefix": device.token_prefix,
         "token_expires_at": device.token_expires_at,
         "token_rotated_at": device.token_rotated_at,
+        "client_cert": device.client_cert_fp[:16] if device.client_cert_fp else None,
         "allow_model_management": device.allow_model_management,
         "active_streams": len(state.device_streams(device.id)),
         "ip_history": [
@@ -401,7 +402,7 @@ class Admin:
         today = state.usage_all_today()
         return {
             "base_url": self.config.base_url,
-            "tls_mode": self.config.tls.mode,
+            "tls_mode": self.config.tls.mode + (" + client certificates" if self.config.tls.client_certs else ""),
             "network_mode": self.config.network.mode,
             "fingerprint": self.fingerprint,
             "uptime": time.time() - state.started_at,

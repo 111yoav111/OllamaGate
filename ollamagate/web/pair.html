@@ -35,6 +35,17 @@
       <input id="token" readonly>
       <button type="button" id="copy">Copy</button>
     </div>
+    <div id="cert" hidden>
+      <p>This server also requires a <strong>client certificate</strong>, shown only once. Without it the
+         token alone does not work. Install the certificate file on this device (phones and browsers), or give
+         <code>client.pem</code> + <code>client.key</code> to your app (e.g. <code>curl --cert client.pem --key client.key</code>).</p>
+      <p><a id="cert-p12" download="ollamagate-device.p12">Download certificate (.p12)</a> · password
+         <code id="cert-pass"></code></p>
+      <p><a id="cert-pem" download="client.pem">client.pem</a> · <a id="cert-key" download="client.key">client.key</a></p>
+      <p class="note">Keep this page open while you install (it can't be shown again). Afterwards, delete the
+         downloaded files and fully restart the browser so it offers the new certificate. After a server restart,
+         delete the old "OllamaGate" certificate from this device and pair again.</p>
+    </div>
     <dl>
       <dt>Server URL</dt><dd><code id="base-url"></code></dd>
       <dt>Ollama API</dt><dd><code id="api-url"></code></dd>

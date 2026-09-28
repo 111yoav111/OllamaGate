@@ -76,6 +76,9 @@ class TLSConfig:
     key_file: str = ""
     # Extra DNS names / IPs for the self-signed certificate.
     extra_sans: list[str] = field(default_factory=list)
+    # mTLS: issue each device a client certificate at pairing and require it
+    # (together with the token) on every request.
+    client_certs: bool = False
 
 
 @dataclass
@@ -174,6 +177,11 @@ class Config:
             raise ConfigError(
                 "Plain HTTP is only allowed on a loopback address. "
                 f"server.host = {s.host!r} requires TLS."
+            )
+        if self.tls.client_certs and (self.tls.mode == "off" or self.network.mode == "cloudflare"):
+            raise ConfigError(
+                "tls.client_certs needs OllamaGate to terminate TLS itself "
+                "(not tls.mode = 'off', not network.mode = 'cloudflare')"
             )
         if self.network.mode not in ("direct", "tailscale", "cloudflare", "letsencrypt"):
             raise ConfigError(f"unknown network.mode {self.network.mode!r}")

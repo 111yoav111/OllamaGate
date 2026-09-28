@@ -520,6 +520,11 @@ class GateTUI(App[None]):
         # Move focus into the shown tab: tables so their keys (r, t, s, k…) work, and
         # always *something* in the tab, because Textual switches back to whichever tab
         # holds the focused widget (e.g. after closing the detail screen).
+        # Leave focus in the tab's own search box: a late TabActivated (e.g. the first
+        # one after startup) must not undo "/".
+        own_input = {"devices": "device-search", "audit": "audit-filter"}.get(tab)
+        if own_input is not None and isinstance(self.focused, Input) and self.focused.id == own_input:
+            return
         target = {
             "devices": "#device-table",
             "audit": "#audit-table",

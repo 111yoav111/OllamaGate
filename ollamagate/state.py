@@ -88,6 +88,8 @@ class Device:
     # During a rotation grace period the previous token keeps working until this time.
     previous_token_hash: str | None = None
     previous_token_valid_until: float | None = None
+    # SHA-256 of the client certificate issued at pairing (mTLS); None = token only.
+    client_cert_fp: str | None = None
     last_seen: float | None = None
     last_ip: str | None = None
     last_port: int | None = None
@@ -192,6 +194,9 @@ class State:
         self.request_log: deque[RequestLogEntry] = deque(maxlen=request_log_size)
         self.streams: dict[str, ActiveStream] = {}
         self.pairing_window: PairingWindow | None = None
+        # Called with True/False when a pairing window opens/closes (mTLS relaxes
+        # its handshake check meanwhile, see tls.ClientCA.set_pairing_open).
+        self.on_pairing_change: Any = None
         self.pairing_history: deque[PairingWindow] = deque(maxlen=50)
         self.lock = asyncio.Lock()
         # Unauthenticated noise (failed logins etc.) is capped per client so an
