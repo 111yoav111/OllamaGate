@@ -121,11 +121,29 @@ def _clamp_int(value: object, maximum: int) -> int:
     return int(min(value, maximum))
 
 
-def apply_body_policy(limits: DeviceLimits, path: str, body: bytes) -> PolicyResult:
+# Ollama decodes bodies with Go's encoding/json, which matches struct field
+# names case-insensitively (with Unicode folding: "ſtream" == "stream") and lets
+# the last match win. A body with both "model" and "MODEL" would therefore pass
+# our checks on one key while Ollama used the other. So where Go does struct
+# matching (top level, options, stream_options) only plain lowercase ASCII keys
+# are accepted - every real field name is written that way anyway.
+_PLAIN_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
+_NATIVE_OPTION_ENDPOINTS = {"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"}
+
+
+def _keys_are_plain(obj: dict) -> bool:
+    return all(_PLAIN_KEY.match(k) for k in obj)
+
+
+def apply_body_policy(
+    limits: DeviceLimits, path: str, body: bytes, remaining_tokens: int | None = None
+) -> PolicyResult:
     """Validate and rewrite a request body according to the device's limits.
 
     Only JSON bodies of model endpoints are touched; the rewritten body is
-    re-serialised only when something changed.
+    re-serialised only when something changed. ``remaining_tokens`` (when a
+    quota applies) further caps the output length so one request can't
+    overshoot the quota by much.
     """
     if path not in _MODEL_ENDPOINTS:
         return PolicyResult(body)
@@ -135,33 +153,51 @@ def apply_body_policy(limits: DeviceLimits, path: str, body: bytes) -> PolicyRes
         return PolicyResult(body, error="request body must be JSON")
     if not isinstance(data, dict):
         return PolicyResult(body, error="request body must be a JSON object")
+    for obj in (data, data.get("options"), data.get("stream_options")):
+        if isinstance(obj, dict) and not _keys_are_plain(obj):
+            return PolicyResult(body, error="request keys must be lowercase field names")
     model = data.get("model")
     if not isinstance(model, str) or not model or len(model) > 200:
         return PolicyResult(body, error="a model name is required")
     if not model_allowed(limits, model):
         return PolicyResult(body, model=model, error="model not allowed for this device", status=403)
 
+    max_predict = limits.max_num_predict
+    if remaining_tokens is not None:
+        max_predict = max(1, min(max_predict, remaining_tokens) if max_predict else remaining_tokens)
+
     changed = False
     streaming = False
-    if path in _GENERATE_API:
+    if path in _NATIVE_OPTION_ENDPOINTS:
         options = data.get("options")
         if options is None:
             options = {}
         if not isinstance(options, dict):
             return PolicyResult(body, model=model, error="options must be an object")
-        for key, maximum in (("num_ctx", limits.max_num_ctx), ("num_predict", limits.max_num_predict)):
+        caps = []
+        # num_ctx is only clamped when asked for: adding it would override Ollama's
+        # own default (and force model reloads when clients mix settings).
+        # Embeddings load a context too, so they are covered.
+        if "num_ctx" in options:
+            caps.append(("num_ctx", limits.max_num_ctx))
+        # num_predict is always set for generation, so every answer is bounded.
+        if path in _GENERATE_API:
+            caps.append(("num_predict", max_predict))
+        for key, maximum in caps:
             if maximum > 0:
                 clamped = _clamp_int(options.get(key), maximum)
                 if options.get(key) != clamped:
                     options[key] = clamped
                     changed = True
-        data["options"] = options
-        streaming = data.get("stream", True) is not False  # Ollama streams by default
+        if options or "options" in data:
+            data["options"] = options
+        if path in _GENERATE_API:
+            streaming = data.get("stream", True) is not False  # Ollama streams by default
     elif path in _GENERATE_V1:
-        if limits.max_num_predict > 0:
+        if max_predict > 0:
             for key in ("max_tokens", "max_completion_tokens"):
                 if key in data or key == "max_tokens":
-                    clamped = _clamp_int(data.get(key), limits.max_num_predict)
+                    clamped = _clamp_int(data.get(key), max_predict)
                     if data.get(key) != clamped:
                         data[key] = clamped
                         changed = True
@@ -187,23 +223,21 @@ def apply_body_policy(limits: DeviceLimits, path: str, body: bytes) -> PolicyRes
 
 
 def filter_model_list(limits: DeviceLimits, path: str, body: bytes) -> bytes:
-    """Hide models the device may not use from /api/tags and /v1/models."""
+    """Hide models the device may not use from /api/tags, /api/ps and /v1/models.
+
+    Fails closed: anything that doesn't look like a model list comes back empty.
+    """
     if not limits.allowed_models:
         return body
+    list_key, name_key = ("data", "id") if path == "/v1/models" else ("models", "name")
     try:
         data = json.loads(body)
     except (ValueError, RecursionError):
-        return body
-    if path == "/api/tags" and isinstance(data, dict) and isinstance(data.get("models"), list):
-        data["models"] = [
-            m for m in data["models"]
-            if isinstance(m, dict) and isinstance(m.get("name"), str) and model_allowed(limits, m["name"])
-        ]
-    elif path == "/v1/models" and isinstance(data, dict) and isinstance(data.get("data"), list):
-        data["data"] = [
-            m for m in data["data"]
-            if isinstance(m, dict) and isinstance(m.get("id"), str) and model_allowed(limits, m["id"])
-        ]
-    else:
-        return body
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get(list_key), list):
+        return json.dumps({list_key: []}).encode()
+    data[list_key] = [
+        m for m in data[list_key]
+        if isinstance(m, dict) and isinstance(m.get(name_key), str) and model_allowed(limits, m[name_key])
+    ]
     return json.dumps(data).encode()

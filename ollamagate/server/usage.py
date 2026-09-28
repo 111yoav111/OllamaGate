@@ -17,11 +17,15 @@ size estimated from the request body.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 # Only a bounded tail of the response is kept for parsing.
 MAX_BUFFER = 256 * 1024
 BYTES_PER_TOKEN = 4
+_TAIL_PROMPT = re.compile(rb'"prompt_eval_count"\s*:\s*(\d{1,9})')
+_TAIL_EVAL = re.compile(rb'(?<!_)"eval_count"\s*:\s*(\d{1,9})')
+_TAIL_USAGE = re.compile(rb'"usage"\s*:\s*(\{[^{}]{0,500}\})')
 
 
 @dataclass
@@ -49,6 +53,7 @@ class UsageCounter:
         self._buf = bytearray()
         self._chunks = 0
         self._usage: Usage | None = None
+        self._truncated = False
 
     @property
     def chunks(self) -> int:
@@ -64,7 +69,10 @@ class UsageCounter:
                 self._line(line)
             self._buf = bytearray(rest[-MAX_BUFFER:])
         elif len(self._buf) > MAX_BUFFER:
-            self._buf = self._buf[-MAX_BUFFER:]  # a non-streamed body this large isn't chat output
+            # A big non-streamed body (e.g. embeddings): keep only the tail, where
+            # Ollama puts the counts; result() then reads them with a regex.
+            self._buf = self._buf[-MAX_BUFFER:]
+            self._truncated = True
 
     def _line(self, line: bytes) -> None:
         line = line.strip()
@@ -92,10 +100,31 @@ class UsageCounter:
         if isinstance(usage, dict) and ("prompt_tokens" in usage or "completion_tokens" in usage):
             self._usage = Usage(_count(usage.get("prompt_tokens")), _count(usage.get("completion_tokens")), True)
 
+    def _scan_tail(self, tail: bytes) -> None:
+        """Find Ollama's counts in the tail of a truncated JSON body.
+
+        Safe against model output: inside JSON strings every quote is escaped,
+        so an unescaped ``"eval_count":`` can only be a real key.
+        """
+        prompt = _TAIL_PROMPT.search(tail)
+        completion = _TAIL_EVAL.search(tail)
+        if prompt or completion:
+            self._usage = Usage(
+                _count(int(prompt.group(1))) if prompt else 0,
+                _count(int(completion.group(1))) if completion else 0,
+                True,
+            )
+            return
+        usage = _TAIL_USAGE.search(tail)
+        if usage:
+            self._parse(b'{"usage":' + usage.group(1) + b"}")
+
     def result(self) -> Usage:
         if self._buf:
             if self.sse or self.ndjson:
                 self._line(bytes(self._buf))
+            elif self._truncated:
+                self._scan_tail(bytes(self._buf))
             else:
                 self._parse(self._buf)  # a complete non-streamed JSON body
             self._buf = bytearray()
