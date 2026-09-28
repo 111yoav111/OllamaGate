@@ -36,11 +36,15 @@ async def probe(client: httpx.AsyncClient) -> OllamaStatus:
             models.append(
                 LoadedModel(
                     name=safe_text(str(m.get("name", "?")), 80),
-                    size=int(m.get("size", 0) or 0),
-                    size_vram=int(m.get("size_vram", 0) or 0),
+                    size=_int(m.get("size")),
+                    size_vram=_int(m.get("size_vram")),
                 )
             )
     return OllamaStatus(reachable=True, version=safe_text(str(version), 40), models=models)
+
+
+def _int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**63 else 0
 
 
 def human_bytes(n: int) -> str:

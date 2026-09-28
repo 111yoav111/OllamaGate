@@ -168,6 +168,8 @@ def create_app(
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
+        if state.lockdown:  # don't even confirm the host is alive
+            return lockdown_response()
         return PlainTextResponse("ok")
 
     @app.get("/me", include_in_schema=False)

@@ -14,6 +14,9 @@ from typing import Any
 
 def safe_text(value: str, limit: int | None = None) -> str:
     """Replace control/format characters (incl. ESC, C1, bidi overrides) with ``\\xNN`` escapes."""
+    truncated = limit is not None and len(value) > limit
+    if truncated:
+        value = value[:limit]  # slice first: never walk a huge attacker-sized string
     out = []
     for ch in value:
         if unicodedata.category(ch)[0] == "C":
@@ -22,8 +25,8 @@ def safe_text(value: str, limit: int | None = None) -> str:
             out.append(ch)
     text = "".join(out)
     if limit is not None and len(text) > limit:
-        text = text[:limit] + "…"
-    return text
+        text = text[:limit]
+    return text + "…" if truncated else text
 
 
 def safe(value: Any) -> str:

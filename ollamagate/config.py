@@ -157,6 +157,8 @@ class Config:
             raise ConfigError(f"invalid ollama.url {self.ollama.url!r}")
         if not is_loopback_host(up.hostname):
             raise ConfigError("ollama.url must point at a loopback address (Ollama must stay local)")
+        if s.public_url:
+            validate_public_url(s.public_url)
         if self.pairing.ttl_seconds < 30 or self.pairing.ttl_seconds > 3600:
             raise ConfigError("pairing.ttl_seconds must be between 30 and 3600")
         if not (1 <= self.pairing.max_attempts <= 10):
@@ -175,6 +177,23 @@ class Config:
         if ":" in host:
             host = f"[{host}]"
         return f"{scheme}://{host}:{self.server.port}"
+
+
+def validate_public_url(url: str) -> None:
+    """The URL devices use to reach us; it ends up in pairing links and QR codes."""
+    if any(ch.isspace() or ord(ch) < 0x20 for ch in url) or len(url) > 200:
+        raise ConfigError("server.public_url must not contain whitespace or control characters")
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises ValueError for a bad port
+    except ValueError as exc:
+        raise ConfigError(f"server.public_url is not a valid URL: {exc}") from None
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ConfigError("server.public_url must look like https://host[:port]")
+    if parts.scheme == "http" and not is_loopback_host(parts.hostname):
+        raise ConfigError("server.public_url must use https (pairing secrets travel in it)")
+    if parts.username or parts.password or parts.query or parts.fragment or parts.path not in ("", "/"):
+        raise ConfigError("server.public_url must be just scheme://host[:port] (no path, query, fragment or user)")
 
 
 def is_loopback_host(host: str) -> bool:
