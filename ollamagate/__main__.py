@@ -17,6 +17,7 @@ from typing import Any, Optional
 import typer
 
 from .config import Config, ConfigError, load_config
+from .textsafe import safe
 
 cli = typer.Typer(add_completion=False, no_args_is_help=True, help="OllamaGate - secure pairing proxy for Ollama")
 devices_cli = typer.Typer(no_args_is_help=True, help="Manage paired devices")
@@ -122,6 +123,8 @@ def pair(
         return
     info = _call(config_path, "pairing.open", methods=method or None, ttl=ttl)
     typer.echo()
+    if info.get("warning"):
+        typer.secho(f"  WARNING: {info['warning']}\n", fg=typer.colors.YELLOW)
     if info.get("code"):
         typer.secho("  Pairing code:  ", nl=False)
         typer.secho(info["code"], bold=True)
@@ -146,13 +149,15 @@ def pair(
             typer.echo(f"\r  Waiting for a device... {left // 60}:{left % 60:02d} left  ", nl=False)
             time.sleep(1)
     except KeyboardInterrupt:
-        _call(config_path, "pairing.cancel")
-        typer.echo("\n  Cancelled.")
-        raise typer.Exit(1)
+        _call(config_path, "pairing.cancel", window_id=info["window_id"])
+        status = _call(config_path, "pairing.status", window_id=info["window_id"])
     typer.echo()
     if status["state"] == "used" and status.get("device"):
         d = status["device"]
-        typer.secho(f"  Paired: {d['name']} ({d['id'][:8]}) from {d['last_ip']}", fg=typer.colors.GREEN)
+        typer.secho(
+            f"  Paired: {safe(d['name'])} ({d['id'][:8]}) from {safe(d['last_ip'] or 'unknown address')}",
+            fg=typer.colors.GREEN,
+        )
     else:
         typer.secho(f"  Pairing window {status['state']}.", fg=typer.colors.YELLOW)
         raise typer.Exit(1)
@@ -171,32 +176,32 @@ def devices_list(config_path: Optional[Path] = ConfigOption) -> None:
     typer.echo(f"{'ID':10} {'NAME':24} {'STATUS':10} {'VIA':5} {'LAST IP':40} LAST SEEN")
     for d in devices:
         typer.echo(
-            f"{d['id'][:8]:10} {d['name'][:24]:24} {d['status']:10} {d['paired_via']:5} "
-            f"{(d['last_ip'] or '-'):40} {_ts(d['last_seen'])}"
+            f"{d['id'][:8]:10} {safe(d['name'])[:24]:24} {d['status']:10} {d['paired_via']:5} "
+            f"{safe(d['last_ip'] or '-'):40} {_ts(d['last_seen'])}"
         )
 
 
 def _print_device(d: dict[str, Any]) -> None:
     rows = [
         ("ID", d["id"]),
-        ("Name", d["name"]),
+        ("Name", safe(d["name"])),
         ("Status", d["status"]),
         ("Paired via", f"{d['paired_via']} at {_ts(d['paired_at'])}"),
-        ("Last seen", f"{_ts(d['last_seen'])} from {d['last_ip'] or '-'}"),
-        ("User agent", d["user_agent"] or "-"),
+        ("Last seen", f"{_ts(d['last_seen'])} from {safe(d['last_ip'] or '-')}"),
+        ("User agent", safe(d["user_agent"] or "-")),
         ("Token", d["token_prefix"]),
         ("Token expires", _ts(d["token_expires_at"]) if d["token_expires_at"] else "never"),
         ("Token rotated", _ts(d["token_rotated_at"])),
         ("Model management", "allowed" if d["allow_model_management"] else "blocked"),
         ("Active streams", str(d["active_streams"])),
-        ("Notes", d["notes"] or "-"),
+        ("Notes", safe(d["notes"] or "-")),
     ]
     for label, value in rows:
         typer.echo(f"{label + ':':18} {value}")
     if d["ip_history"]:
         typer.echo("IP history:")
         for h in d["ip_history"]:
-            typer.echo(f"  {h['ip']:40} x{h['count']:<5} {_ts(h['first_seen'])} .. {_ts(h['last_seen'])}")
+            typer.echo(f"  {safe(h['ip']):40} x{h['count']:<5} {_ts(h['first_seen'])} .. {_ts(h['last_seen'])}")
 
 
 @devices_cli.command("show")
@@ -209,7 +214,7 @@ def devices_show(device_id: str, config_path: Optional[Path] = ConfigOption) -> 
 def devices_rename(device_id: str, name: str, config_path: Optional[Path] = ConfigOption) -> None:
     """Rename a device."""
     d = _call(config_path, "devices.rename", ref=device_id, name=name)
-    typer.echo(f"Renamed to {d['name']!r}.")
+    typer.echo(f"Renamed to {safe(d['name'])!r}.")
 
 
 @devices_cli.command("notes")
@@ -229,7 +234,7 @@ def devices_revoke(
     if not yes:
         typer.confirm(f"Revoke device {device_id}?", abort=True)
     d = _call(config_path, "devices.revoke", ref=device_id)
-    typer.echo(f"Revoked {d['name']!r}.")
+    typer.echo(f"Revoked {safe(d['name'])!r}.")
 
 
 @devices_cli.command("rotate")
@@ -240,7 +245,7 @@ def devices_rotate(
 ) -> None:
     """Issue a new token for a device (shown once)."""
     result = _call(config_path, "devices.rotate", ref=device_id, grace_seconds=grace)
-    typer.echo(f"New token for {result['device']['name']!r} (shown once):")
+    typer.echo(f"New token for {safe(result['device']['name'])!r} (shown once):")
     typer.secho(result["token"], bold=True)
     if grace:
         typer.echo(f"The old token keeps working for {grace} seconds.")
@@ -250,14 +255,14 @@ def devices_rotate(
 def devices_suspend(device_id: str, config_path: Optional[Path] = ConfigOption) -> None:
     """Temporarily block a device without deleting it."""
     d = _call(config_path, "devices.suspend", ref=device_id)
-    typer.echo(f"Suspended {d['name']!r}.")
+    typer.echo(f"Suspended {safe(d['name'])!r}.")
 
 
 @devices_cli.command("resume")
 def devices_resume(device_id: str, config_path: Optional[Path] = ConfigOption) -> None:
     """Resume a suspended device."""
     d = _call(config_path, "devices.resume", ref=device_id)
-    typer.echo(f"Resumed {d['name']!r}.")
+    typer.echo(f"Resumed {safe(d['name'])!r}.")
 
 
 @devices_cli.command("kick")
@@ -274,9 +279,20 @@ def devices_expiry(
     config_path: Optional[Path] = ConfigOption,
 ) -> None:
     """Set when a device's token expires."""
-    value: Any = int(expiry) if expiry.isdigit() else expiry
+    value: Any = int(expiry) if expiry.isascii() and expiry.isdigit() else expiry
     d = _call(config_path, "devices.expiry", ref=device_id, expiry=value)
     typer.echo(f"Token expires: {_ts(d['token_expires_at']) if d['token_expires_at'] else 'never'}")
+
+
+@devices_cli.command("model-management")
+def devices_model_management(
+    device_id: str,
+    allow: bool = typer.Option(..., "--allow/--deny", help="Allow or deny pull/push/delete/create/copy"),
+    config_path: Optional[Path] = ConfigOption,
+) -> None:
+    """Grant or revoke access to Ollama's model management endpoints."""
+    d = _call(config_path, "devices.model_management", ref=device_id, allowed=allow)
+    typer.echo(f"Model management for {safe(d['name'])!r}: {'allowed' if d['allow_model_management'] else 'blocked'}")
 
 
 # ----- audit / doctor ------------------------------------------------------------------
@@ -290,9 +306,9 @@ def audit(
 ) -> None:
     """Show recent audit log entries."""
     for e in _call(config_path, "audit.list", limit=limit, event=event):
-        detail = " ".join(f"{k}={v}" for k, v in e["detail"].items())
+        detail = " ".join(f"{safe(k)}={safe(v)}" for k, v in e["detail"].items())
         who = (e["device_id"] or "")[:8]
-        typer.echo(f"{_ts(e['ts'])}  {e['event']:22} {e['ip'] or '-':16} {who:8} {detail}")
+        typer.echo(f"{_ts(e['ts'])}  {safe(e['event']):22} {safe(e['ip'] or '-'):16} {who:8} {detail}")
 
 
 @cli.command()
