@@ -168,6 +168,9 @@ class CertReloader:
         if stamp is None or stamp == self._stamp:
             return False
         try:
+            # Validate the pair on a throwaway context first: a failed load_cert_chain
+            # can leave the live context half-updated and break every new handshake.
+            build_server_context(self.cert_path, self.key_path)
             self.ctx.load_cert_chain(str(self.cert_path), str(self.key_path))
         except (OSError, ssl.SSLError):
             return False  # half-written or mismatched pair: keep the old one, retry later
