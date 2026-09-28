@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#1e293b">
+<title>OllamaGate chat</title>
+<link rel="stylesheet" href="/app/app.css">
+<script src="/app/app.js" defer></script>
+</head>
+<body>
+<header>
+  <select id="model" aria-label="Model"></select>
+  <button type="button" id="new" title="New chat">New</button>
+  <button type="button" id="logout" title="Sign this browser out">Sign out</button>
+</header>
+<main id="log" aria-live="polite"></main>
+<p id="status" role="status" hidden></p>
+<form id="composer" autocomplete="off">
+  <textarea id="prompt" rows="1" placeholder="Message…" required></textarea>
+  <button type="submit" id="send">Send</button>
+  <button type="button" id="stop" hidden>Stop</button>
+</form>
+</body>
+</html>

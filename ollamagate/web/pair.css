@@ -18,3 +18,4 @@ dt { font-weight: 600; margin-top: .5rem; }
 dd { margin: 0; word-break: break-all; }
 code { font-family: ui-monospace, monospace; font-size: .9em; }
 .note { font-size: .9em; opacity: .8; }
+.primary-link { display: inline-block; padding: .7rem 1.2rem; border-radius: .4rem; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
