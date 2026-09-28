@@ -85,6 +85,7 @@ ollamagate devices revoke <id>           # must pair again
 ollamagate devices rotate <id> [--grace 60]   # prints a new token once
 ollamagate devices expiry <id> never|1d|7d|30d|<seconds>
 ollamagate audit [--event pairing]
+ollamagate status                        # the dashboard, for scripts / headless mode
 ollamagate lockdown on|off
 ollamagate settings list
 ollamagate settings set server.public_url https://my-pc.tailnet.ts.net:8443
