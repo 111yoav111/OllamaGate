@@ -119,6 +119,8 @@ def open_window(
         },
     )
     state.pairing_window = window
+    if state.on_pairing_change is not None:
+        state.on_pairing_change(True)
     state.audit("pairing_opened", window_id=window.id, methods=list(methods), ttl=ttl_seconds)
     return PairingSecrets(
         window_id=window.id,
@@ -136,6 +138,8 @@ def close_window(state: State, new_state: WindowState, reason: str = "") -> None
     window.state = new_state
     state.pairing_window = None
     state.pairing_history.append(window)
+    if state.on_pairing_change is not None:
+        state.on_pairing_change(False)
     if new_state is not WindowState.USED:
         state.audit(f"pairing_{new_state.value}", window_id=window.id, reason=reason, attempts=window.attempts)
 
@@ -223,6 +227,8 @@ def claim(
             close_window(state, WindowState.DESTROYED, reason="too many wrong attempts")
         return ClaimResult(ClaimError.INVALID, attempts_left=max(left, 0))
 
+    # Issue the certificate first: if that fails, no token-only device is left behind.
+    cert = client_ca.issue(name) if client_ca is not None else None
     token = auth.new_device_token()
     device = state.add_device(
         name=name,
@@ -232,7 +238,6 @@ def claim(
         allow_model_management=allow_model_management,
         limits=limits,
     )
-    cert = client_ca.issue(device.id) if client_ca is not None else None
     if cert is not None:
         device.client_cert_fp = cert.fingerprint
     state.touch_device(device, ip, None, ua)

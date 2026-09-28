@@ -166,10 +166,18 @@ token and that device's certificate, so a leaked token alone is useless:
 curl --cert client.pem --key client.key -H "Authorization: Bearer og_dev_..." https://<server>:8443/api/tags
 ```
 
+Outside an open pairing window, connections without a valid certificate are
+refused during the TLS handshake, before any HTTP is parsed; while a window is
+open, new devices can reach `/pair` without one. With client certificates on,
+only TLS 1.3 is accepted (it encrypts the client certificate).
+
 The signing CA lives only in memory and is new on every start, like the device
-list, so a restart invalidates all certificates too. Pairing itself needs no
-certificate. Not available with `network.mode = "cloudflare"` or `tls.mode = "off"`
-(OllamaGate must terminate TLS itself).
+list, so a restart invalidates all certificates too: remove the old certificate
+from the device and pair again. A lost certificate also means revoke + re-pair.
+Only use this if all your apps can send a client certificate (browsers, curl,
+Python/httpx can; many chat apps can't). Not available with
+`network.mode = "cloudflare"` or `tls.mode = "off"` (OllamaGate must terminate
+TLS itself).
 
 `ollamagate doctor` checks the whole setup: Ollama running and not exposed,
 certificate validity and name, network mode prerequisites, file permissions.

@@ -142,11 +142,17 @@ def build_server_context(cert_path: Path, key_path: Path, client_ca_pem: str | N
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
     ctx.load_cert_chain(str(cert_path), str(key_path))
     if client_ca_pem:
-        # Optional at the TLS layer: unpaired devices must still reach /pair. A cert
-        # that is presented must chain to our CA; which device it belongs to (and
-        # whether that device needs one) is checked per request in auth.authenticate.
-        ctx.verify_mode = ssl.CERT_OPTIONAL
+        # Connections without one of our client certificates are refused at the
+        # handshake; ClientCA.set_pairing_open relaxes that while a pairing window
+        # is open, so a new device can reach /pair. Which device a certificate
+        # belongs to is checked per request in auth.authenticate.
+        ctx.verify_mode = ssl.CERT_REQUIRED
         ctx.load_verify_locations(cadata=client_ca_pem)
+        # TLS 1.3 encrypts the client certificate (1.2 sends it in the clear, which
+        # would let anyone on the path track a device). No session tickets: a
+        # session resumed from a pairing window would skip the certificate check.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.num_tickets = 0
     return ctx
 
 
@@ -166,6 +172,7 @@ class ClientCert:
 
 
 CLIENT_CERT_DAYS = 397
+_P12_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32: easy to type
 
 
 class ClientCA:
@@ -178,7 +185,12 @@ class ClientCA:
 
     def __init__(self) -> None:
         self._key = ec.generate_private_key(ec.SECP256R1())
-        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "OllamaGate device CA")])
+        self.context: ssl.SSLContext | None = None  # the live server context (set by the runner)
+        # A new name per start: browsers pick which certificate to send by issuer
+        # name, so they must not offer one from before a restart. It would fail
+        # verification and abort the handshake, locking the device out of /pair.
+        cn = f"OllamaGate device CA {secrets.token_hex(4)}"
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
         now = dt.datetime.now(dt.timezone.utc)
         self.cert = (
             x509.CertificateBuilder()
@@ -201,12 +213,20 @@ class ClientCA:
         )
         self.pem = self.cert.public_bytes(serialization.Encoding.PEM).decode()
 
-    def issue(self, device_id: str) -> ClientCert:
+    def set_pairing_open(self, is_open: bool) -> None:
+        """Accept handshakes without a client certificate only while pairing is open."""
+        if self.context is not None:
+            self.context.verify_mode = ssl.CERT_OPTIONAL if is_open else ssl.CERT_REQUIRED
+
+    def issue(self, label: str) -> ClientCert:
+        """A certificate for one device. ``label`` only names the .p12 on the device."""
         key = ec.generate_private_key(ec.SECP256R1())
         now = dt.datetime.now(dt.timezone.utc)
+        # A random subject: nothing in the certificate identifies the device.
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, secrets.token_hex(8))])
         cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, device_id)]))
+            .subject_name(subject)
             .issuer_name(self.cert.subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
@@ -216,9 +236,9 @@ class ClientCA:
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
             .sign(self._key, hashes.SHA256())
         )
-        password = secrets.token_urlsafe(12)
+        password = "-".join("".join(secrets.choice(_P12_ALPHABET) for _ in range(4)) for _ in range(4))
         # Legacy PKCS#12 encryption on purpose: iOS/macOS and older Android refuse the
-        # AES/PBKDF2 variant. The password is random (96 bits), so this is only a wrapper.
+        # AES/PBKDF2 variant. The password is random (80 bits), so this is only a wrapper.
         encryption = (
             serialization.PrivateFormat.PKCS12.encryption_builder()
             .kdf_rounds(50000)
@@ -232,7 +252,9 @@ class ClientCA:
             key_pem=key.private_bytes(
                 serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
             ).decode(),
-            p12=pkcs12.serialize_key_and_certificates(b"OllamaGate", key, cert, None, encryption),
+            p12=pkcs12.serialize_key_and_certificates(
+                f"OllamaGate {label} {now:%Y-%m-%d}".encode(), key, cert, None, encryption
+            ),
             p12_password=password,
             fingerprint=hashlib.sha256(der).hexdigest(),
         )

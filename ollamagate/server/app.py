@@ -180,6 +180,8 @@ def create_app(
     client_ca: ClientCA | None = None,
 ) -> FastAPI:
     trusted = parse_networks(config.network.trusted_proxies)
+    if client_ca is not None:
+        state.on_pairing_change = client_ca.set_pairing_open
     b = config.bans
     state.bans.configure(b.failures, b.window_seconds, b.ban_seconds, b.max_ban_seconds)
 
@@ -324,7 +326,9 @@ def create_app(
                 path=path,
                 user_agent=request.headers.get("user-agent", ""),
             )
-            if outcome.result in (auth.AuthResult.INVALID, auth.AuthResult.NO_CERT) and not via_cookie:
+            # NO_CERT doesn't count either: that caller had the right token (the audit
+            # entry with reason=no_cert shows the owner a token may have leaked).
+            if outcome.result is auth.AuthResult.INVALID and not via_cookie:
                 # Only a wrong bearer token counts. Anonymous requests don't: any web
                 # page can make a visitor's browser send those (no-cors fetch, <img>),
                 # which would let sites get their visitors banned. A stale browser

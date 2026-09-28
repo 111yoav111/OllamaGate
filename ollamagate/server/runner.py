@@ -117,6 +117,8 @@ def build_uvicorn_config(
         uv_config.ssl = tls.build_server_context(
             tls_info.cert_path, tls_info.key_path, client_ca.pem if client_ca else None
         )
+        if client_ca is not None:
+            client_ca.context = uv_config.ssl
     return uv_config
 
 

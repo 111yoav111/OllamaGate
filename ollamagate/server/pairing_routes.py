@@ -162,6 +162,10 @@ def register_pairing_routes(
                 "p12_password": cert.p12_password,
             }
         response = _json(200, payload)
+        if cert is not None:
+            # This connection was made without a certificate; make the browser open
+            # a fresh one (which can present the certificate once it's installed).
+            response.headers["Connection"] = "close"
         # Also sign this browser in to the built-in chat (HttpOnly: page scripts can't read it).
         response.headers["Set-Cookie"] = session_cookie_header(result.token, SESSION_MAX_AGE)
         return response

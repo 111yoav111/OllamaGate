@@ -194,6 +194,9 @@ class State:
         self.request_log: deque[RequestLogEntry] = deque(maxlen=request_log_size)
         self.streams: dict[str, ActiveStream] = {}
         self.pairing_window: PairingWindow | None = None
+        # Called with True/False when a pairing window opens/closes (mTLS relaxes
+        # its handshake check meanwhile, see tls.ClientCA.set_pairing_open).
+        self.on_pairing_change: Any = None
         self.pairing_history: deque[PairingWindow] = deque(maxlen=50)
         self.lock = asyncio.Lock()
         # Unauthenticated noise (failed logins etc.) is capped per client so an
