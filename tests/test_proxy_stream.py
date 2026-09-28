@@ -178,7 +178,8 @@ def test_client_disconnect_cancels_upstream(gate, client):
         headers=bearer(gate.token),
         json={"model": "m", "fake_chunks": 200, "fake_delay": 0.05},
     ) as r:
-        next(r.iter_lines())
+        lines = r.iter_lines()  # keep a reference: a dropped generator closes the connection
+        next(lines)
     # Closing the client connection must abort the upstream generation.
     assert wait_for(lambda: rec.streams_aborted == 1, timeout=3)
     assert rec.streams_completed == 0

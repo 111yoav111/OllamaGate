@@ -104,6 +104,32 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         await record(request)
         return JSONResponse({"version": "0.0.0-fake"}, headers={"x-upstream-secret": "leak"})
 
+    async def broken_json(request: Request):
+        """Starts a JSON body, then dies mid-response (upstream crash)."""
+        await record(request)
+
+        async def body():
+            yield b'{"modelfile": "partial'
+            await asyncio.sleep(0.05)
+            raise RuntimeError("upstream crashed")
+
+        return StreamingResponse(body(), media_type="application/json")
+
+    async def infinite(request: Request):
+        """An endless fast stream, to fill socket buffers."""
+        await record(request)
+
+        async def body():
+            rec.streams_started += 1
+            try:
+                while True:
+                    yield b'{"message":{"content":"' + b"x" * 65000 + b'"},"done":false}\n'
+                    await asyncio.sleep(0)
+            finally:
+                rec.streams_aborted += 1
+
+        return StreamingResponse(body(), media_type="application/x-ndjson")
+
     async def generic(request: Request):
         await record(request)
         return JSONResponse({"status": "success"})
@@ -115,6 +141,8 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         Route("/api/tags", tags, methods=["GET"]),
         Route("/api/version", version, methods=["GET"]),
         Route("/api/pull", generic, methods=["POST"]),
+        Route("/api/show", broken_json, methods=["POST"]),
+        Route("/api/embed", infinite, methods=["POST"]),
         Route("/api/delete", generic, methods=["DELETE"]),
         Route("/api/internal", generic, methods=["GET", "POST"]),
     ]

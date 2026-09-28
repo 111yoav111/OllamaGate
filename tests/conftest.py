@@ -14,6 +14,7 @@ import uvicorn
 from ollamagate.config import Config
 from ollamagate.server import auth
 from ollamagate.server.app import create_app
+from ollamagate.server.runner import build_server
 from ollamagate.state import Device, State
 
 from .fake_ollama import Recorder, make_fake_ollama
@@ -22,18 +23,19 @@ from .fake_ollama import Recorder, make_fake_ollama
 class ThreadedServer:
     """Run an ASGI app under a real uvicorn server in a background thread."""
 
-    def __init__(self, app: Any, ssl_context: Any = None, **kwargs: Any) -> None:
+    def __init__(self, app: Any = None, ssl_context: Any = None, server: uvicorn.Server | None = None, **kwargs: Any) -> None:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
         self.port = self.sock.getsockname()[1]
-        config = uvicorn.Config(
-            app, log_level="warning", lifespan="on", proxy_headers=False, server_header=False, **kwargs
-        )
-        config.load()
-        if ssl_context is not None:
-            config.ssl = ssl_context
-        self.server = uvicorn.Server(config)
+        if server is None:
+            config = uvicorn.Config(
+                app, log_level="warning", lifespan="on", proxy_headers=False, server_header=False, **kwargs
+            )
+            config.load()
+            if ssl_context is not None:
+                config.ssl = ssl_context
+            server = uvicorn.Server(config)
+        self.server = server
         self.thread = threading.Thread(target=self.server.run, kwargs={"sockets": [self.sock]}, daemon=True)
 
     def start(self) -> "ThreadedServer":
@@ -62,6 +64,7 @@ class Gate:
     recorder: Recorder
     token: str
     device: Device
+    server: Any = None
 
     def call(self, fn: Callable[[], Any]) -> Any:
         """Run ``fn`` on the gate's event loop (state mutations must happen there)."""
@@ -74,12 +77,14 @@ class Gate:
 
     def new_device(self, name: str = "extra", **kwargs: Any) -> tuple[str, Device]:
         token = auth.new_device_token()
-        device = self.state.add_device(
-            name=name,
-            token_hash=auth.hash_token(token),
-            token_prefix=auth.display_prefix(token),
-            paired_via="test",
-            **kwargs,
+        device = self.call(
+            lambda: self.state.add_device(
+                name=name,
+                token_hash=auth.hash_token(token),
+                token_prefix=auth.display_prefix(token),
+                paired_via="test",
+                **kwargs,
+            )
         )
         return token, device
 
@@ -122,13 +127,17 @@ def gate_factory(fake_ollama, make_config):
             name="phone", token_hash=auth.hash_token(token), token_prefix=auth.display_prefix(token), paired_via="test"
         )
         app = create_app(cfg, state)
-        server = ThreadedServer(app).start()
+        # Use the production uvicorn config (guarded protocol, limits, shutdown hook).
+        gate_server = build_server(cfg, app, state, None)
+        gate_server.config.log_level = "warning"
+        server = ThreadedServer(server=gate_server).start()
         servers.append(server)
-        return Gate(server.url, state, app, rec, token, device)
+        return Gate(server.url, state, app, rec, token, device, gate_server)
 
     yield factory
     for s in servers:
         s.stop()
+        assert not s.thread.is_alive(), "gate did not shut down"
 
 
 @pytest.fixture
