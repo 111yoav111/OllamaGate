@@ -30,18 +30,16 @@ _ASSETS = {
 }
 
 
-def session_cookie_header(token: str, secure: bool, max_age: int) -> str:
-    parts = [f"{auth.SESSION_COOKIE}={token}", "Path=/", "HttpOnly", "SameSite=Strict", f"Max-Age={max_age}"]
-    if secure:
-        parts.append("Secure")
-    return "; ".join(parts)
+def session_cookie_header(token: str, max_age: int) -> str:
+    # Always Secure: even with tls.mode = "off" the page is reached over HTTPS
+    # (a tunnel) or on localhost, which browsers treat as a secure context.
+    return f"{auth.SESSION_COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}"
 
 
 def register_app_routes(
     app: FastAPI,
     state: State,
     unauthorized: Callable[[], Response],
-    secure_cookies: bool,
 ) -> None:
     assets = {
         path: (resources.files("ollamagate.web").joinpath(name).read_bytes(), ctype)
@@ -78,5 +76,5 @@ def register_app_routes(
         if not (token and via_cookie):
             return unauthorized()
         response = JSONResponse({"ok": True})
-        response.headers["Set-Cookie"] = session_cookie_header("", secure_cookies, 0)
+        response.headers["Set-Cookie"] = session_cookie_header("", 0)
         return response

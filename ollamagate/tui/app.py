@@ -148,7 +148,12 @@ class GateTUI(App[None]):
             with TabPane("Settings", id="settings"):
                 with VerticalScroll():
                     yield Static(
-                        Text("Runtime changes last until restart; edit config.toml to keep them.", style="dim")
+                        Text(
+                            "Runtime changes last until restart; edit config.toml to keep them.\n"
+                            "limits.* are defaults for devices paired from now on; "
+                            "change an existing device's limits with L on the Devices tab.",
+                            style="dim",
+                        )
                     )
                     for key in RUNTIME_SETTINGS:
                         with Horizontal(classes="setting"):
@@ -373,11 +378,19 @@ class GateTUI(App[None]):
 
     def _update_bans(self) -> None:
         table = self._q("#ban-table", DataTable)
+        bans = sorted(self.admin.list_bans(), key=lambda b: b["created_at"], reverse=True)
+        if [row.key.value for row in table.ordered_rows] == [b["key"] for b in bans]:
+            return  # unchanged: don't rebuild (keeps the cursor where the owner put it)
+        selected = None
+        if table.row_count:
+            selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         table.clear()
-        for b in sorted(self.admin.list_bans(), key=lambda b: b["created_at"], reverse=True):
+        for b in bans:
             until = "until lifted" if b["until"] is None else ts(b["until"])
             kind = "manual" if b["manual"] else f"auto (strike {b['strikes']})"
             table.add_row(t(b["key"]), t(until), t(kind), t(b["reason"]), key=b["key"])
+        if selected in [b["key"] for b in bans]:
+            table.move_cursor(row=table.get_row_index(selected))
 
     def _update_pairing(self) -> None:
         info = self._q("#pairing-info", Static)

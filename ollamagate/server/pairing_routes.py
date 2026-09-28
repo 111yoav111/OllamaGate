@@ -55,7 +55,7 @@ def register_pairing_routes(
     state: State,
     fingerprint: str | None,
     client_ip: Callable[[Request], str | None],
-    record_failure: Callable[[str | None, str], None] = lambda ip, reason: None,
+    record_failure: Callable[[str | None, str, str], None] = lambda ip, reason, attempt: None,
 ) -> None:
     assets = {path: (_load_asset(name), ctype) for path, (name, ctype) in _ASSETS.items()}
     # Claims are what an attacker would brute-force; page loads get more slack.
@@ -137,7 +137,7 @@ def register_pairing_routes(
         if result.error is pairing.ClaimError.BAD_NAME:
             return _json(400, {"error": "device name must be 1-64 printable characters"})
         if result.error is pairing.ClaimError.INVALID:
-            record_failure(ip, "failed pairing attempts")
+            record_failure(ip, "failed pairing attempts", f"{kind}:{value}")
             return _json(403, {"error": "invalid pairing code", "attempts_left": result.attempts_left})
         assert result.device is not None and result.token is not None
         response = _json(
@@ -152,7 +152,5 @@ def register_pairing_routes(
             },
         )
         # Also sign this browser in to the built-in chat (HttpOnly: page scripts can't read it).
-        response.headers["Set-Cookie"] = session_cookie_header(
-            result.token, secure=config.tls.mode != "off", max_age=SESSION_MAX_AGE
-        )
+        response.headers["Set-Cookie"] = session_cookie_header(result.token, SESSION_MAX_AGE)
         return response

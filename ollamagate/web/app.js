@@ -64,7 +64,7 @@
         body: JSON.stringify({ model: $("model").value, messages: history, stream: true }),
         signal: controller.signal,
       });
-      if (!res.ok) { out.remove(); history.pop(); bubble("error", await explain(res)); return; }
+      if (!res.ok) { out.remove(); bubble("error", await explain(res)); return; }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -92,8 +92,14 @@
     } finally {
       controller = null;
       $("send").hidden = false; $("stop").hidden = true;
-      if (answer) history.push({ role: "assistant", content: answer });
-      else if (!out.textContent) out.remove();
+      if (answer) {
+        history.push({ role: "assistant", content: answer });
+      } else {
+        // No answer (error, stop, lost connection): forget the question too, so the
+        // next message doesn't send two user turns in a row.
+        history.pop();
+        if (out.isConnected && !out.textContent) out.remove();
+      }
     }
   }
 

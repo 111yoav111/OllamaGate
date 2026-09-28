@@ -46,8 +46,11 @@ def extract_bearer(headers: Mapping[str, str]) -> str | None:
     return token or None
 
 
-# Browser sessions (the /app chat) carry the device token in this cookie.
-SESSION_COOKIE = "og_session"
+# Browser sessions (the /app chat) carry the device token in this cookie. The
+# __Host- prefix makes browsers insist on Secure, Path=/ and no Domain, so a
+# sibling subdomain or port can't plant or overwrite it. (Browsers treat
+# http://localhost as secure, so this also works in loopback-only HTTP mode.)
+SESSION_COOKIE = "__Host-og_session"
 CSRF_HEADER = "x-ollamagate-csrf"
 
 
