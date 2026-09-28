@@ -31,7 +31,10 @@ ttl_seconds = 300
 max_attempts = 5
 requests_per_minute_per_ip = 10
 
-[limits]                     # defaults for every newly paired device (0 = unlimited)
+# Defaults for every newly paired device (0 = unlimited).
+# Enforced today: max_concurrent, allow_model_management.
+# The rest are enforced from Phase 4 on.
+[limits]
 tokens_per_day = 0
 tokens_per_month = 0
 requests_per_minute = 60

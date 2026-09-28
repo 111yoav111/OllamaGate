@@ -14,7 +14,8 @@ and the host machine itself.
 
 ## What's protected (Phases 1-2)
 
-- **No anonymous access.** Every route except `/healthz` requires a device token.
+- **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
+  owner has a pairing window open) requires a device token.
   Requests to `/api/*` and `/v1/*` without a valid token get a generic `401`
   (no hint whether the path exists); every other path returns `404`. There is no
   `Server` header, no OpenAPI/docs route, and no trailing-slash redirects.
@@ -54,15 +55,34 @@ and the host machine itself.
   secrets carried in the URL **fragment**, so they never reach server logs or
   `Referer` headers; the page removes them from the address bar. Only SHA-256
   hashes of the secrets are kept, compared in constant time. Claims are
-  rate-limited per IP (10/min), must be same-origin JSON (no cross-site form
-  posts), and every open/fail/success/expiry is audited with IP and user agent.
-  Device names are stripped of control and bidi characters.
-- **Pairing links carry the certificate fingerprint** (`fp=`); the pairing page
-  warns if the certificate it received doesn't match.
+  rate-limited per client (10/min; IPv6 clients per /64), must be same-origin
+  JSON (no cross-site form posts), and every open/fail/success/expiry is
+  audited with IP and user agent. Device names are NFKC-normalised and
+  stripped of control, bidi and combining characters.
+- **Attempt budgets.** 5 wrong *codes* disable the code; the unguessable QR/link
+  secrets have a separate, larger budget (50 wrong guesses). This deviates
+  slightly from "5 attempts destroy the window" on purpose: otherwise anyone who
+  notices a window is open could kill it with five junk requests. The window is
+  destroyed once every method is used up.
+- **Certificate fingerprint.** Pairing links carry `fp=<sha256>` and the pairing
+  page displays it. Only a client that checks the TLS certificate itself can use
+  it for pinning; the pairing page cannot detect a man-in-the-middle, so compare
+  the fingerprint in the browser's certificate viewer with the one on the
+  server's screen if you are on an untrusted network.
+- **Terminal safety.** Paths, user agents and other client-supplied text are
+  stored with control characters escaped and escaped again on output, so no
+  one can inject terminal escape sequences into the owner's CLI.
+- **Audit log flooding.** Events that unauthenticated clients can trigger
+  (failed logins, rate-limit hits) are capped at 10 per client per minute; the
+  rest are only counted, so real events aren't flushed out.
 - **Admin channel.** CLI administration uses a `0600` Unix socket in a `0700`
   directory (Windows: `127.0.0.1` on a random port) *and* a 256-bit secret from
-  an owner-only file, compared in constant time. There is no remote admin API.
-  Admin actions are audited. Device views never include token hashes.
+  an owner-only file, compared in constant time. Replies carry an HMAC proof over
+  a client nonce, so a process squatting on a stale port can't feed the CLI fake
+  pairing links. The run directory must be a real, owner-owned directory (no
+  symlinks). A second instance using the same config directory is refused.
+  There is no remote admin API. Admin actions are audited. Device views never
+  include token hashes.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
@@ -88,6 +108,8 @@ and the host machine itself.
   that are removed on shutdown. They exist only because CLI commands need to
   reach the in-memory state of the running server.
 - Anyone who can act as your OS user can administer OllamaGate (by design).
+- On Windows the admin secret file relies on the per-user profile ACLs; keep the
+  config directory in your profile (the default `%APPDATA%`).
 
 ## Reporting
 
