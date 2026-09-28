@@ -92,12 +92,16 @@ class DeviceDetailScreen(Screen[None]):
         app: Any = self.app
         # Reuse the app's actions; they operate on the table's selected row.
         table = app._q("#device-table")
-        try:
-            table.move_cursor(row=table.get_row_index(self.device_id))
-        except Exception:  # noqa: BLE001 - filtered out of the table; clear the search
+        if self.device_id not in [row.key.value for row in table.ordered_rows]:
+            # Filtered out by the search box: clear the search (box and filter) first.
+            app._q("#device-search").value = ""
             app._search = ""
             app._update_devices()
+        try:
             table.move_cursor(row=table.get_row_index(self.device_id))
+        except Exception:  # noqa: BLE001 - the device is gone
+            app.say("Device no longer exists", severity="warning")
+            return
         getattr(app, f"action_device_{name}")()
 
     def action_notes(self) -> None:
@@ -147,18 +151,27 @@ class LimitsScreen(ModalScreen[None]):
             self.dismiss(None)
             return
         app: Any = self.app
-        allowed = self.query_one("#mm", Switch).value
-        ok = app._run_admin(app.admin.set_model_management, self.device_id, allowed) is not None
-        choice = self.query_one("#expiry", Select).value
-        if ok and choice not in (Select.BLANK, None):
-            value: Any = choice
+        # Validate everything first, then apply only what changed (no half-applied edits).
+        select = self.query_one("#expiry", Select)
+        choice = select.value
+        expiry: Any = None
+        if not select.is_blank():
+            expiry = choice
             if choice == "custom":
                 raw = self.query_one("#expiry-custom", Input).value.strip()
-                value = int(raw) if raw.isascii() and raw.isdigit() else raw
-            ok = app._run_admin(app.admin.set_expiry, self.device_id, value) is not None
-        if ok:
-            app.notify("Limits updated")
-            self.dismiss(None)
+                if not (raw.isascii() and raw.isdigit() and len(raw) <= 12):
+                    app.say("Custom expiry must be a number of seconds", severity="error")
+                    return
+                expiry = int(raw)
+        current = app.admin.show_device(self.device_id)
+        allowed = self.query_one("#mm", Switch).value
+        if expiry is not None and app._run_admin(app.admin.set_expiry, self.device_id, expiry) is None:
+            return
+        if allowed != current["allow_model_management"]:
+            if app._run_admin(app.admin.set_model_management, self.device_id, allowed) is None:
+                return
+        app.say("Limits updated")
+        self.dismiss(None)
 
     def action_close(self) -> None:
         self.dismiss(None)

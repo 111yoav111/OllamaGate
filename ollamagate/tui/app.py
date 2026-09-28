@@ -11,7 +11,9 @@ only when something changed, so a flood of requests can't make it spin.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from urllib.parse import urlsplit
 from collections import deque
 from typing import Any, Callable
 
@@ -26,12 +28,16 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sta
 
 from .. import qr
 from ..admin.errors import AdminError
+from ..config import is_loopback_host
 from ..admin.service import RUNTIME_SETTINGS, Admin
 from ..ollama_status import OllamaStatus, human_bytes, probe
 from ..server.tls import format_fingerprint
+from ..textsafe import safe
 from .widgets import ACTIVITY_DOT, ConfirmScreen, InputScreen, MessageScreen, ago, duration, t, ts
 
-REFRESH_INTERVAL = 0.5
+log = logging.getLogger("ollamagate.tui")
+
+REFRESH_INTERVAL = 1.0  # redraws share the proxy's event loop; keep them rare
 OLLAMA_POLL_INTERVAL = 5.0
 
 
@@ -60,6 +66,8 @@ class GateTUI(App[None]):
         Binding("/", "search", "Search"),
         Binding("ctrl+l", "lockdown", "LOCKDOWN", priority=True),
         Binding("q", "quit_gate", "Quit"),
+        # Textual's default Ctrl+Q would quit (and stop the server) without asking.
+        Binding("ctrl+q", "quit_gate", "Quit", show=False, priority=True),
         Binding("1", "tab('dashboard')", "Dashboard", show=False),
         Binding("2", "tab('devices')", "Devices", show=False),
         Binding("3", "tab('pairing')", "Pairing", show=False),
@@ -85,13 +93,15 @@ class GateTUI(App[None]):
         self.ollama_url = ollama_url
         self.ollama = OllamaStatus(reachable=False, error="not checked yet")
         self._seen_version = -1
-        self._last_audit_len = 0
+        self._last_audit_seq = 0
+        self._audit_rendered_seq = -1
         self._search = ""
         self._audit_filter = ""
         # Plaintext pairing secrets live only here, only while the window is open.
         self._pairing: dict[str, Any] | None = None
         self._pairing_result: Text | None = None  # outcome of the last window we opened
         self._exit_requested = False
+        self.quit_confirmed = False  # True only when the owner chose to quit
 
     # ----- layout ------------------------------------------------------------------
 
@@ -132,7 +142,7 @@ class GateTUI(App[None]):
 
     def on_mount(self) -> None:
         devices = self._q("#device-table", DataTable)
-        devices.add_columns("", "Name", "ID", "IP", "Client", "Via", "Last seen", "Now", "Req today")
+        self._device_columns = devices.add_columns("", "Name", "ID", "IP", "Client", "Via", "Last seen", "Now", "Req today")
         audit = self._q("#audit-table", DataTable)
         audit.add_columns("Time", "Event", "IP", "Device", "Detail")
         self._fill_settings()
@@ -176,31 +186,44 @@ class GateTUI(App[None]):
         self._update_dashboard()
 
     def refresh_all(self) -> None:
+        """Redraw what is visible. Hidden tabs are redrawn when they are shown."""
         self._seen_version = self.state.version
-        self._update_dashboard()
-        self._update_devices()
-        self._update_audit()
+        tab = self._q(TabbedContent).active
+        if tab == "dashboard":
+            self._update_dashboard()
+        elif tab == "devices":
+            self._update_devices()
+        elif tab == "audit":
+            self._update_audit()
+        elif tab == "settings":
+            self._fill_settings(only_unfocused=True)
         self._update_pairing()
         self._notify_new_events()
 
     async def poll_ollama(self) -> None:
-        self.ollama = await probe(self._ollama_client)
+        try:
+            self.ollama = await probe(self._ollama_client)
+        except Exception as exc:  # noqa: BLE001 - whatever Ollama returns, keep running
+            self.ollama = OllamaStatus(reachable=False, error=type(exc).__name__)
         if self._is_live():
             self._update_dashboard()
 
     def _notify_new_events(self) -> None:
-        """Toasts for events the owner should notice right away."""
-        entries = list(self.state.audit_log)
-        new = entries[self._last_audit_len :] if len(entries) >= self._last_audit_len else entries[-5:]
-        self._last_audit_len = len(entries)
-        for e in new[-5:]:
+        """Toasts for events the owner should notice right away.
+
+        Tracks the audit sequence number, not the log length: the log is a ring
+        buffer whose length stops changing once it is full.
+        """
+        new = [e for e in self.state.audit_log if e.seq > self._last_audit_seq][-5:]
+        self._last_audit_seq = self.state.audit_seq
+        for e in new:
             name = self._device_name(e.device_id)
             if e.event == "pairing_succeeded":
-                self.notify(f"New device paired: {name}", title="Pairing", timeout=8)
+                self.say(f"New device paired: {name}", title="Pairing", timeout=8)
             elif e.event == "device_new_ip":
-                self.notify(f"{name} connected from a new IP: {e.ip}", title="New IP", severity="warning", timeout=8)
+                self.say(f"{name} connected from a new IP: {e.ip}", title="New IP", severity="warning", timeout=8)
             elif e.event == "pairing_destroyed":
-                self.notify("Pairing window destroyed after too many wrong attempts", severity="error")
+                self.say("Pairing window destroyed after too many wrong attempts", severity="error")
 
     def _device_name(self, device_id: str | None) -> str:
         device = self.state.get_device(device_id) if device_id else None
@@ -214,6 +237,8 @@ class GateTUI(App[None]):
 
         warn = self._q("#warnings", Static)
         warnings = list(self.warnings)
+        if is_loopback_host(urlsplit(self.admin.config.base_url).hostname or ""):
+            warnings.append("server.public_url is not set: pairing links point at loopback, phones can't reach them.")
         if self.ollama.reachable is False and self.ollama_url:
             warnings.append(f"Ollama not reachable at {self.ollama_url} ({self.ollama.error})")
         warn.update(Text("\n".join("⚠ " + w for w in warnings), style="bold red") if warnings else "")
@@ -257,15 +282,14 @@ class GateTUI(App[None]):
 
     def _update_devices(self) -> None:
         table = self._q("#device-table", DataTable)
-        selected = self._selected_device_id()
-        table.clear()
         needle = self._search.lower()
+        rows: list[tuple[str, list[Text]]] = []
         for d in sorted(self.admin.list_devices(), key=lambda v: v["paired_at"]):
             haystack = " ".join(str(d[k] or "") for k in ("name", "id", "last_ip", "client", "user_agent")).lower()
             if needle and needle not in haystack:
                 continue
             now = ", ".join(d["current_models"]) or (f"{d['active_streams']} stream(s)" if d["active_streams"] else "")
-            table.add_row(
+            cells = [
                 ACTIVITY_DOT.get(d["activity"], Text("?")),
                 t(d["name"]),
                 t(d["id"][:8]),
@@ -275,16 +299,34 @@ class GateTUI(App[None]):
                 t(ago(d["last_seen"])),
                 t(now),
                 t(d["requests_today"]),
-                key=d["id"],
-            )
-        if selected is not None:
-            try:
-                table.move_cursor(row=table.get_row_index(selected))
-            except Exception:  # noqa: BLE001 - the device is gone or filtered out
-                pass
+            ]
+            rows.append((d["id"], cells))
+        current = [row.key.value for row in table.ordered_rows]
+        if current == [key for key, _ in rows]:
+            # Same devices in the same order: update cells in place (cursor stays put).
+            for key, cells in rows:
+                for column, cell in zip(self._device_columns, cells):
+                    table.update_cell(key, column, cell)
+            return
+        selected = self._selected_device_id()
+        table.clear()
+        for key, cells in rows:
+            table.add_row(*cells, key=key)
+        if selected is not None and selected in [key for key, _ in rows]:
+            table.move_cursor(row=table.get_row_index(selected))
 
-    def _update_audit(self) -> None:
+    def _update_audit(self, force: bool = False) -> None:
+        if not force and self.state.audit_seq == self._audit_rendered_seq:
+            return  # rebuilding 1000 rows is costly; only do it when the log changed
+        self._audit_rendered_seq = self.state.audit_seq
         table = self._q("#audit-table", DataTable)
+        # Keep the cursor on the same entry (new rows appear above it).
+        selected = None
+        if table.row_count:
+            try:
+                selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:  # noqa: BLE001
+                selected = None
         table.clear()
         needle = self._audit_filter.lower()
         for e in reversed(list(self.state.audit_log)[-1000:]):
@@ -292,7 +334,14 @@ class GateTUI(App[None]):
             if needle and needle not in f"{e.event} {e.ip} {e.device_id} {detail}".lower():
                 continue
             style = "red" if e.event in ("auth_failed", "pairing_failed", "pairing_destroyed") or "lockdown" in e.event else ""
-            table.add_row(t(ts(e.ts)), t(e.event, style), t(e.ip), t((e.device_id or "")[:8]), t(detail))
+            table.add_row(
+                t(ts(e.ts)), t(e.event, style), t(e.ip), t((e.device_id or "")[:8]), t(detail), key=str(e.seq)
+            )
+        if selected is not None:
+            try:
+                table.move_cursor(row=table.get_row_index(selected), scroll=False)
+            except Exception:  # noqa: BLE001 - the entry fell out of the view
+                pass
 
     def _update_pairing(self) -> None:
         info = self._q("#pairing-info", Static)
@@ -343,11 +392,19 @@ class GateTUI(App[None]):
 
     # ----- settings -------------------------------------------------------------------
 
-    def _fill_settings(self) -> None:
+    def _fill_settings(self, only_unfocused: bool = False) -> None:
+        """Show current values; with ``only_unfocused``, don't clobber the field being edited."""
         for key, value in self.admin.get_settings().items():
-            self._q("#set-" + key.replace(".", "-"), Input).value = str(value)
+            field = self._q("#set-" + key.replace(".", "-"), Input)
+            if only_unfocused and field.has_focus:
+                continue
+            field.value = str(value)
 
     # ----- helpers --------------------------------------------------------------------
+
+    def say(self, message: str, **kwargs: Any) -> None:
+        """A toast. Never markup: messages can contain device names and other client text."""
+        self.notify(safe(message), markup=False, **kwargs)
 
     def _q(self, selector: str, expect_type: Any = None) -> Any:
         """Query the main screen, even while a dialog or detail screen is on top.
@@ -370,7 +427,11 @@ class GateTUI(App[None]):
         try:
             result = fn(*args, **kwargs)
         except AdminError as exc:
-            self.notify(str(exc), severity="error")
+            self.say(str(exc), severity="error")
+            return None
+        except Exception:  # noqa: BLE001 - a TUI bug must never take the server down
+            log.exception("admin action failed in the TUI")
+            self.say("That action failed unexpectedly (see the log on the dashboard).", severity="error")
             return None
         self.refresh_all()
         return result
@@ -378,7 +439,7 @@ class GateTUI(App[None]):
     def _with_device(self, action: Callable[[dict[str, Any]], None]) -> None:
         device_id = self._selected_device_id()
         if device_id is None:
-            self.notify("Select a device first (Devices tab)", severity="warning")
+            self.say("Select a device first (Devices tab)", severity="warning")
             return
         device = self._run_admin(self.admin.show_device, device_id)
         if device is not None:
@@ -386,18 +447,47 @@ class GateTUI(App[None]):
 
     # ----- global actions ---------------------------------------------------------------
 
+    def _to_base(self) -> bool:
+        """Close the detail screen/dialogs so tab changes happen where the owner can see them.
+
+        Returns True if anything was closed.
+        """
+        popped = False
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
+            popped = True
+        return popped
+
     def action_tab(self, tab: str) -> None:
+        if self._to_base():
+            # Switch once the base screen is active again, or the change is lost.
+            self.call_after_refresh(self.action_tab, tab)
+            return
         self._q(TabbedContent).active = tab
         self._focus_tab(tab)
+        self.call_after_refresh(self._focus_tab, tab)  # again, after any focus restore
 
     def _focus_tab(self, tab: str) -> None:
-        # Focus the table so its action keys (r, t, s, k…) work and show in the footer.
-        target = {"devices": "#device-table", "audit": "#audit-table"}.get(tab)
+        # Move focus into the shown tab: tables so their keys (r, t, s, k…) work, and
+        # always *something* in the tab, because Textual switches back to whichever tab
+        # holds the focused widget (e.g. after closing the detail screen).
+        target = {
+            "devices": "#device-table",
+            "audit": "#audit-table",
+            "pairing": "#pair-open",
+            "settings": "#set-server-public_url",
+        }.get(tab)
         if target:
             self._q(target).focus()
+        else:
+            self.screen_stack[0].set_focus(None)
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        self._focus_tab(event.pane.id or "")
+        tab = event.pane.id or ""
+        if tab == "audit":
+            self._update_audit(force=True)
+        self.refresh_all()  # draw the newly visible tab now
+        self._focus_tab(tab)
 
     def action_pair(self) -> None:
         self.action_tab("pairing")
@@ -409,6 +499,9 @@ class GateTUI(App[None]):
             self._update_pairing()
 
     def action_search(self) -> None:
+        if self._to_base():
+            self.call_after_refresh(self.action_search)  # once the main screen is back
+            return
         tab = self._q(TabbedContent).active
         target = "#audit-filter" if tab == "audit" else "#device-search"
         if tab != "audit":
@@ -417,6 +510,8 @@ class GateTUI(App[None]):
         self.call_after_refresh(lambda: self._q(target, Input).focus())
 
     def action_lockdown(self) -> None:
+        if isinstance(self.screen, ConfirmScreen):
+            return  # Ctrl+L has priority; don't stack a second question on top of one
         if self.state.lockdown:
             self.push_screen(
                 ConfirmScreen("Lift lockdown and accept traffic again?", danger=False),
@@ -429,9 +524,13 @@ class GateTUI(App[None]):
             )
 
     def action_quit_gate(self) -> None:
+        if isinstance(self.screen, ConfirmScreen):
+            return
+
         def done(ok: bool | None) -> None:
             if ok:
                 self._exit_requested = True
+                self.quit_confirmed = True
                 self.exit()
 
         self.push_screen(
@@ -472,23 +571,33 @@ class GateTUI(App[None]):
         self._with_device(ask)
 
     def action_device_suspend(self) -> None:
-        def go(d: dict[str, Any]) -> None:
+        def ask(d: dict[str, Any]) -> None:
+            name = t(d["name"]).plain
             if d["status"] == "suspended":
-                self._run_admin(self.admin.resume, d["id"])
+                self.push_screen(
+                    ConfirmScreen(f"Resume {name}?", danger=False),
+                    lambda ok: ok and self._run_admin(self.admin.resume, d["id"]),
+                )
             elif d["status"] == "active":
-                self._run_admin(self.admin.suspend, d["id"])
+                self.push_screen(
+                    ConfirmScreen(f"Suspend {name}? Its requests are cut until you resume it."),
+                    lambda ok: ok and self._run_admin(self.admin.suspend, d["id"]),
+                )
             else:
-                self.notify("Revoked devices can't be suspended", severity="warning")
+                self.say("Revoked devices can't be suspended", severity="warning")
 
-        self._with_device(go)
+        self._with_device(ask)
 
     def action_device_kick(self) -> None:
-        def go(d: dict[str, Any]) -> None:
-            result = self._run_admin(self.admin.kick, d["id"])
-            if result is not None:
-                self.notify(f"Terminated {result['streams_killed']} request(s)")
+        def ask(d: dict[str, Any]) -> None:
+            def go(ok: bool | None) -> None:
+                result = self._run_admin(self.admin.kick, d["id"]) if ok else None
+                if result is not None:
+                    self.say(f"Terminated {result['streams_killed']} request(s)")
 
-        self._with_device(go)
+            self.push_screen(ConfirmScreen(f"End all active requests of {t(d['name']).plain}?"), go)
+
+        self._with_device(ask)
 
     def action_device_rename(self) -> None:
         def ask(d: dict[str, Any]) -> None:
@@ -505,7 +614,7 @@ class GateTUI(App[None]):
         self._with_device(lambda d: self.push_screen(LimitsScreen(d["id"])))
 
     def action_device_ban(self) -> None:
-        self.notify("IP bans arrive in Phase 4 (policy & auto-bans).", severity="warning")
+        self.say("IP bans arrive in Phase 4 (policy & auto-bans).", severity="warning")
 
     # ----- events -------------------------------------------------------------------------
 
@@ -515,7 +624,7 @@ class GateTUI(App[None]):
             self._update_devices()
         elif event.input.id == "audit-filter":
             self._audit_filter = event.value
-            self._update_audit()
+            self._update_audit(force=True)
 
     def on_key(self, event: Any) -> None:
         if event.key == "escape" and isinstance(self.focused, Input) and self.focused.id in ("device-search", "audit-filter"):
@@ -536,16 +645,17 @@ class GateTUI(App[None]):
         elif bid == "pair-cancel":
             window_id = self._pairing["window_id"] if self._pairing else None
             if self._run_admin(self.admin.cancel_pairing, window_id) is not None and window_id is None:
-                self.notify("No pairing window of yours is open")
+                self.say("No pairing window of yours is open")
         elif bid.startswith("save-"):
             self._save_setting(bid.removeprefix("save-"))
 
     def _save_setting(self, slug: str) -> None:
         key = next(k for k in RUNTIME_SETTINGS if k.replace(".", "-") == slug)
-        value = self._q("#set-" + slug, Input).value
-        if self._run_admin(self.admin.set_setting, key, value) is not None:
-            self.notify(f"{key} = {value} (until restart)")
-        self._fill_settings()
+        field = self._q("#set-" + slug, Input)
+        if self._run_admin(self.admin.set_setting, key, field.value) is not None:
+            self.say(f"{key} = {field.value} (until restart)")
+        # Only reset the field that was saved; other fields may hold unsaved edits.
+        field.value = str(self.admin.get_settings()[key])
 
     async def on_unmount(self) -> None:
         client = getattr(self, "_ollama_client", None)
