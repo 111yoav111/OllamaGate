@@ -16,6 +16,7 @@ Channels:
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import shutil
 import subprocess
@@ -49,7 +50,8 @@ EVENTS = {
 def describe(entry: AuditEntry, state: State) -> str | None:
     """A short, secret-free sentence for an audit entry (None = not notifiable)."""
     device = state.get_device(entry.device_id) if entry.device_id else None
-    name = safe_text(device.name, 64) if device else "a device"
+    # Quoted, so a device named e.g. "Lockdown lifted" can't pose as a system message.
+    name = f'"{safe_text(device.name, 64)}"' if device else "a device"
     ip = safe_text(entry.ip or "?", 64)
     d = entry.detail
     if entry.event == "pairing_succeeded":
@@ -69,6 +71,12 @@ def describe(entry: AuditEntry, state: State) -> str | None:
     return None
 
 
+# Events that are always delivered (not subject to the rate limit): the ones an
+# attacker can't mass-produce and the owner must never miss.
+PRIORITY = {"pairing", "lockdown"}
+SUMMARY_INTERVAL = 60.0
+
+
 class Notifier:
     def __init__(self, config: NotifyConfig, state: State, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
@@ -77,6 +85,10 @@ class Notifier:
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_SIZE)
         self._sent: list[float] = []
         self.dropped = 0
+        # Bans can be mass-produced (e.g. many IPv6 /64s): count them and send one
+        # summary per interval instead of a push per ban.
+        self.pending_bans = 0
+        self._last_summary = time.monotonic()
 
     @property
     def enabled(self) -> bool:
@@ -88,24 +100,51 @@ class Notifier:
         kind = EVENTS.get(entry.event)
         if kind is None or kind not in self.config.events:
             return
+        if entry.event == "ban_auto":
+            self.pending_bans += 1
+            return
         message = describe(entry, self.state)
         if message is None:
             return
+        if kind in PRIORITY:
+            message = "\x00" + message  # marker: bypasses the rate limit
         try:
             self.queue.put_nowait(message)
         except asyncio.QueueFull:
             self.dropped += 1
 
+    def _summary(self) -> str | None:
+        parts = []
+        if self.pending_bans:
+            parts.append(f"{self.pending_bans} client(s) auto-banned in the last minute")
+            self.pending_bans = 0
+        if self.dropped:
+            parts.append(f"{self.dropped} notification(s) dropped (too many events)")
+            self.dropped = 0
+        return "; ".join(parts) or None
+
     async def run(self) -> None:
-        """Deliver queued messages until cancelled."""
+        """Deliver queued messages until cancelled. Never dies on a delivery error."""
         own_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=10)
         try:
             while True:
-                message = await self.queue.get()
+                try:
+                    message = await asyncio.wait_for(self.queue.get(), SUMMARY_INTERVAL / 4)
+                except asyncio.TimeoutError:
+                    message = None
                 now = time.monotonic()
+                if now - self._last_summary >= SUMMARY_INTERVAL:
+                    summary = self._summary()
+                    if summary:
+                        self._last_summary = now
+                        await self._deliver(client, summary)
+                if message is None:
+                    continue
+                priority = message.startswith("\x00")
+                message = message.lstrip("\x00")
                 self._sent = [t for t in self._sent if now - t < 60]
-                if len(self._sent) >= MAX_PER_MINUTE:
+                if not priority and len(self._sent) >= MAX_PER_MINUTE:
                     self.dropped += 1
                     continue
                 self._sent.append(now)
@@ -117,29 +156,32 @@ class Notifier:
     async def _deliver(self, client: httpx.AsyncClient, message: str) -> None:
         c = self.config
         text = "OllamaGate: " + message
+        channels = []
         if c.ntfy_url:
-            try:
-                await client.post(c.ntfy_url, content=text.encode(), headers={"Title": "OllamaGate"})
-            except httpx.HTTPError as exc:
-                log.warning("ntfy notification failed: %s", type(exc).__name__)
+            channels.append(("ntfy", lambda: client.post(c.ntfy_url, content=text.encode(), headers={"Title": "OllamaGate"})))
         if c.telegram_bot_token and c.telegram_chat_id:
-            try:
-                await client.post(
-                    f"https://api.telegram.org/bot{c.telegram_bot_token}/sendMessage",
-                    json={"chat_id": c.telegram_chat_id, "text": text},
-                )
-            except httpx.HTTPError as exc:
-                # Never log the URL: it contains the bot token.
-                log.warning("telegram notification failed: %s", type(exc).__name__)
+            channels.append(("telegram", lambda: client.post(
+                f"https://api.telegram.org/bot{c.telegram_bot_token}/sendMessage",
+                json={"chat_id": c.telegram_chat_id, "text": text},
+            )))
         if c.desktop:
-            await asyncio.to_thread(desktop_notify, text)
+            channels.append(("desktop", lambda: asyncio.to_thread(desktop_notify, text)))
+        for name, send in channels:
+            try:
+                response = await send()
+                if isinstance(response, httpx.Response) and response.status_code >= 400:
+                    log.warning("%s notification rejected: HTTP %d", name, response.status_code)
+            except Exception as exc:  # noqa: BLE001 - one broken channel must not stop the others
+                # Only the type: URLs/messages may contain the bot token or topic.
+                log.warning("%s notification failed: %s", name, type(exc).__name__)
 
 
 def desktop_notify(text: str) -> None:
     """Show a desktop notification on this machine (best effort)."""
     cmd: list[str] | None = None
     if sys.platform.startswith("linux") and shutil.which("notify-send"):
-        cmd = ["notify-send", "OllamaGate", text]
+        # notify-send renders Pango markup in the body: escape it.
+        cmd = ["notify-send", "OllamaGate", html.escape(text)]
     elif sys.platform == "darwin" and shutil.which("osascript"):
         # Passed as an argument, never interpolated into the script: no injection.
         script = 'on run argv\ndisplay notification (item 1 of argv) with title "OllamaGate"\nend run'
