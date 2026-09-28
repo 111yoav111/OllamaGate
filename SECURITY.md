@@ -135,15 +135,22 @@ and the host machine itself.
 - **Network modes.** In `tailscale` mode OllamaGate binds only to the Tailscale
   address (never the LAN or `0.0.0.0`), so a device needs tailnet access *and*
   a device token. In `cloudflare` mode it stays on loopback and trusts only the
-  local tunnel for client IPs. Renewed certificates (Tailscale, Let's Encrypt)
-  are loaded into the live TLS context; a half-written renewal is ignored.
-- **Notifications** are opt-in, carry metadata only (device name, IP, reason),
-  are rate-limited and asynchronous so they can't slow requests down, and never
-  log the Telegram bot URL (it contains the token). ntfy topics are readable by
+  local tunnel for client IPs (so a local process could spoof client IPs - it
+  would already be on your machine). Renewed certificates (Tailscale, Let's
+  Encrypt) are validated on a scratch context before being loaded into the live
+  one, so a half-written or mismatched renewal never breaks TLS. Only
+  self-signed certificates are pinned in pairing links (CA-issued ones change
+  on renewal).
+- **Notifications** are opt-in, carry metadata only (device name in quotes, IP,
+  reason), and are asynchronous so they can't slow requests down. Pairing and
+  lockdown alerts always go out; bans (which an attacker can mass-produce) are
+  summarised once a minute, and dropped messages are reported. Request URLs are
+  never logged (the Telegram URL contains the bot token). ntfy topics are readable by
   anyone who knows the name: use a long random one or your own server.
 - **Service install** always installs a per-user service (systemd user unit,
-  LaunchAgent, or a Task Scheduler task with limited rights) and refuses to run
-  as root/Administrator; `serve` warns when started as root.
+  LaunchAgent, or the user's Startup folder on Windows) and refuses to run as
+  root/Administrator; `serve` refuses too unless given `--allow-root`. Paths in
+  the systemd unit are escaped (`%`, `$`), and control characters are refused.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 

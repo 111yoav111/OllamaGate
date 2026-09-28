@@ -161,12 +161,14 @@ in `config.example.toml`. Messages never contain tokens or prompts.
 ## Running as a service
 
 ```bash
-ollamagate service install     # systemd user unit / macOS LaunchAgent / Windows logon task
+ollamagate service install     # systemd user unit / macOS LaunchAgent / Windows Startup folder
 ollamagate service uninstall
 ```
 
-The service runs as your normal user (never root), headless; manage it with
-the CLI commands above. Restarting it forgets all devices (state is in memory).
+The service runs as your normal user, headless; manage it with the CLI
+commands above. `serve` refuses to run as root/Administrator unless you pass
+`--allow-root`. In Tailscale mode on Linux, allow your user to fetch
+certificates once with `sudo tailscale set --operator=$USER`. Restarting it forgets all devices (state is in memory).
 
 ## Configuration
 
