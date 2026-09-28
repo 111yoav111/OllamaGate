@@ -76,6 +76,21 @@ def serve(
     from .state import State
 
     config = _load(config_path)
+    from . import service as _service
+
+    if _service.running_as_admin():
+        typer.secho(
+            "WARNING: running as root/Administrator. Run OllamaGate as a normal user.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+    from .network import apply_network_mode
+
+    try:
+        network_notes = apply_network_mode(config).notes
+    except ConfigError as exc:
+        typer.secho(f"Network setup error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     log_lines: deque[str] = deque(maxlen=200)
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     if no_tui:
@@ -100,6 +115,8 @@ def serve(
 
     if no_tui:
         typer.echo(f"OllamaGate listening on {config.base_url}")
+        for note in network_notes:
+            typer.echo(f"  {note}")
         if tls_info:
             typer.echo(f"TLS certificate SHA-256: {format_fingerprint(tls_info.fingerprint)}")
         from urllib.parse import urlsplit
@@ -117,6 +134,11 @@ def serve(
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
         server_task = asyncio.ensure_future(server.serve(sockets=[sock]))
+        upkeep = asyncio.ensure_future(_maintenance(config, server, tls_info))
+        from . import notify
+
+        notifier = notify.attach(state, config.notify)
+        notify_task = asyncio.ensure_future(notifier.run()) if notifier else None
         try:
             if not no_tui:
                 from .tui.app import GateTUI
@@ -145,9 +167,33 @@ def serve(
                     )
             await server_task
         finally:
+            upkeep.cancel()
+            if notify_task is not None:
+                notify_task.cancel()
             await control.close()
 
     asyncio.run(main())
+
+
+async def _maintenance(config: Config, server: Any, tls_info: Any) -> None:
+    """Background upkeep while serving: renew and hot-reload certificates."""
+    from .server.tls import CertReloader
+
+    log = logging.getLogger("ollamagate")
+    reloader = CertReloader(server.config.ssl, tls_info.cert_path, tls_info.key_path) if tls_info else None
+    last_renewal = time.monotonic()
+    while True:
+        await asyncio.sleep(60)
+        if config.network.mode == "tailscale" and time.monotonic() - last_renewal > 86400:
+            last_renewal = time.monotonic()
+            from .network import tailscale_cert, tailscale_info
+
+            try:  # tailscale renews only when needed; cheap to ask daily
+                await asyncio.to_thread(lambda: tailscale_cert(tailscale_info(), config.config_dir / "tls"))
+            except ConfigError as exc:
+                log.warning("tailscale certificate renewal failed: %s", exc)
+        if reloader is not None and reloader.check():
+            log.info("TLS certificate changed on disk; reloaded without restarting")
 
 
 class _BufferHandler(logging.Handler):
@@ -496,6 +542,57 @@ def bans_remove(ip: str, config_path: Optional[Path] = ConfigOption) -> None:
     """Lift a ban."""
     r = _call(config_path, "bans.remove", ip=ip)
     typer.echo("Ban lifted." if r["removed"] else "No such ban.")
+
+
+service_cli = typer.Typer(no_args_is_help=True, help="Run OllamaGate in the background (per-user service)")
+cli.add_typer(service_cli, name="service")
+
+
+def _run_commands(commands: list[list[str]], dry_run: bool) -> None:
+    import shlex
+    import subprocess
+
+    for cmd in commands:
+        cmd = [c for c in cmd if c]  # e.g. no $USER for loginctl
+        typer.echo("  $ " + shlex.join(cmd))
+        if not dry_run:
+            result = subprocess.run(cmd, check=False)
+            if result.returncode != 0:
+                typer.secho(f"    (exit code {result.returncode})", fg=typer.colors.YELLOW)
+
+
+@service_cli.command("install")
+def service_install(
+    config_path: Optional[Path] = ConfigOption,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be written and run"),
+) -> None:
+    """Install and start OllamaGate as a service for the current user (headless)."""
+    from . import service
+
+    if service.running_as_admin():
+        typer.secho("Refusing to install as root/Administrator: run this as your normal user.", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    p = service.plan(config_path)
+    if p.path is not None:
+        typer.echo(f"{'Would write' if dry_run else 'Writing'} {p.path}")
+        if dry_run:
+            typer.echo(p.content)
+        else:
+            service.write_service_file(p)
+    _run_commands(p.activate, dry_run)
+    typer.echo("Note: restarting the service forgets every device (state is in memory); they must pair again.")
+
+
+@service_cli.command("uninstall")
+def service_uninstall(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    """Stop and remove the per-user service."""
+    from . import service
+
+    p = service.plan(None)
+    _run_commands(p.deactivate, dry_run)
+    if p.path is not None and p.path.exists() and not dry_run:
+        p.path.unlink()
+        typer.echo(f"Removed {p.path}")
 
 
 # ----- audit / doctor ------------------------------------------------------------------
