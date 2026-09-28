@@ -59,33 +59,56 @@ def _ts(value: float | None) -> str:
 
 
 @cli.command()
-def serve(config_path: Optional[Path] = ConfigOption) -> None:
-    """Run the proxy server (headless; the admin TUI arrives in Phase 3)."""
+def serve(
+    config_path: Optional[Path] = ConfigOption,
+    no_tui: bool = typer.Option(False, "--no-tui", help="Run headless (manage it with the CLI commands)"),
+) -> None:
+    """Run the proxy server with the admin TUI (or headless with --no-tui)."""
+    from collections import deque
+
     from . import doctor
     from .admin.ipc import start_control_server
     from .admin.service import Admin
+    from .config import is_loopback_host
     from .server.app import create_app
     from .server.runner import build_server, prepare_tls
     from .server.tls import format_fingerprint
     from .state import State
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = _load(config_path)
+    log_lines: deque[str] = deque(maxlen=200)
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if no_tui:
+        logging.basicConfig(level=logging.INFO, format=fmt)
+    else:
+        # Logging to the terminal would corrupt the TUI; keep recent lines in memory instead.
+        handler = _BufferHandler(log_lines)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+
     state = State(config.logging.audit_size, config.logging.request_log_size)
     tls_info = prepare_tls(config)
     fingerprint = tls_info.fingerprint if tls_info else None
 
-    typer.echo(f"OllamaGate listening on {config.base_url}")
-    if tls_info:
-        typer.echo(f"TLS certificate SHA-256: {format_fingerprint(tls_info.fingerprint)}")
-    for finding in doctor.check_ollama_binding(config):
-        if finding.level != "ok":
-            typer.secho(f"WARNING: {finding.title}. {finding.fix}", fg=typer.colors.RED, err=True)
-    typer.echo("Pair a device with:  ollamagate pair")
+    warnings = [f"{f.title}. {f.fix}" for f in doctor.check_ollama_binding(config) if f.level != "ok"]
 
     app = create_app(config, state, fingerprint=fingerprint)
-    server = build_server(config, app, state, tls_info)
+    server = build_server(config, app, state, tls_info, own_logging=no_tui)
     admin = Admin(state, config, fingerprint)
+    # Bind now, so "address in use" is reported before any TUI takes over the terminal.
+    sock = server.config.bind_socket()
+
+    if no_tui:
+        typer.echo(f"OllamaGate listening on {config.base_url}")
+        if tls_info:
+            typer.echo(f"TLS certificate SHA-256: {format_fingerprint(tls_info.fingerprint)}")
+        from urllib.parse import urlsplit
+
+        if is_loopback_host(urlsplit(config.base_url).hostname or ""):
+            warnings.append("server.public_url is not set: pairing links point at loopback; phones can't reach them.")
+        for w in warnings:
+            typer.secho(f"WARNING: {w}", fg=typer.colors.RED, err=True)
+        typer.echo("Pair a device with:  ollamagate pair")
 
     async def main() -> None:
         try:
@@ -93,12 +116,50 @@ def serve(config_path: Optional[Path] = ConfigOption) -> None:
         except RuntimeError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
+        server_task = asyncio.ensure_future(server.serve(sockets=[sock]))
         try:
-            await server.serve()
+            if not no_tui:
+                from .tui.app import GateTUI
+
+                tui = GateTUI(
+                    admin, services=server_task, warnings=warnings, log_lines=log_lines, ollama_url=config.ollama.url
+                )
+                crashed = None
+                try:
+                    await tui.run_async()
+                except Exception as exc:  # noqa: BLE001
+                    crashed = exc
+                if tui.quit_confirmed or server_task.done():
+                    server.should_exit = True  # the owner quit (or the server already stopped)
+                else:
+                    # The TUI died on its own. Devices live in memory, so stopping the server
+                    # would disconnect everyone: keep serving headless instead.
+                    logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+                    for line in log_lines:
+                        typer.echo(line, err=True)
+                    typer.secho(
+                        f"The admin TUI stopped unexpectedly ({crashed!r}); the server keeps running headless. "
+                        "Use the CLI commands (ollamagate devices ...) or Ctrl+C to stop.",
+                        fg=typer.colors.RED,
+                        err=True,
+                    )
+            await server_task
         finally:
             await control.close()
 
     asyncio.run(main())
+
+
+class _BufferHandler(logging.Handler):
+    def __init__(self, lines: Any) -> None:
+        super().__init__()
+        self.lines = lines
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:  # noqa: BLE001 - logging must never raise
+            self.handleError(record)
 
 
 # ----- pairing -------------------------------------------------------------------------
@@ -293,6 +354,63 @@ def devices_model_management(
     """Grant or revoke access to Ollama's model management endpoints."""
     d = _call(config_path, "devices.model_management", ref=device_id, allowed=allow)
     typer.echo(f"Model management for {safe(d['name'])!r}: {'allowed' if d['allow_model_management'] else 'blocked'}")
+
+
+@cli.command()
+def status(config_path: Optional[Path] = ConfigOption) -> None:
+    """Show the dashboard: URL, devices, streams, requests, pairing and lockdown state."""
+    d = _call(config_path, "dashboard")
+    pairing_state = "closed" if d["pairing"] is None else f"open ({int(d['pairing']['expires_at'] - time.time())}s left)"
+    rows = [
+        ("Public URL", d["base_url"]),
+        ("TLS", d["tls_mode"]),
+        ("Network mode", d["network_mode"]),
+        ("Uptime", f"{int(d['uptime'] // 60)} min"),
+        ("Lockdown", "ON" if d["lockdown"] else "off"),
+        ("Devices", f"{d['devices_active']} active / {d['devices']} total"),
+        ("Active streams", d["active_streams"]),
+        ("Requests", f"{d['requests_last_minute']}/min, {d['requests_today']} today"),
+        ("Pairing", pairing_state),
+    ]
+    for label, value in rows:
+        typer.echo(f"{label + ':':16} {safe(value)}")
+
+
+# ----- lockdown / settings -------------------------------------------------------------
+
+
+@cli.command()
+def lockdown(
+    state: str = typer.Argument(..., help="on or off"),
+    config_path: Optional[Path] = ConfigOption,
+) -> None:
+    """Reject all traffic and close pairing (on), or resume (off). Devices are kept."""
+    if state not in ("on", "off"):
+        typer.secho("Use 'on' or 'off'", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    result = _call(config_path, "lockdown.set", on=state == "on")
+    if result["lockdown"]:
+        typer.secho(f"LOCKDOWN on: {result['streams_killed']} stream(s) cut, pairing closed.", fg=typer.colors.RED)
+    else:
+        typer.echo("Lockdown off.")
+
+
+settings_cli = typer.Typer(no_args_is_help=True, help="View or change runtime settings (until restart)")
+cli.add_typer(settings_cli, name="settings")
+
+
+@settings_cli.command("list")
+def settings_list(config_path: Optional[Path] = ConfigOption) -> None:
+    """Show settings that can be changed while running."""
+    for key, value in _call(config_path, "settings.get").items():
+        typer.echo(f"{key:32} {safe(value)}")
+
+
+@settings_cli.command("set")
+def settings_set(key: str, value: str, config_path: Optional[Path] = ConfigOption) -> None:
+    """Change a runtime setting (lasts until restart; edit config.toml to keep it)."""
+    _call(config_path, "settings.set", key=key, value=value)
+    typer.echo(f"{key} = {value}")
 
 
 # ----- audit / doctor ------------------------------------------------------------------

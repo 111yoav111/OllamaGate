@@ -61,7 +61,7 @@ def register_pairing_routes(
 
     def gate(request: Request, limiter: RateLimiter) -> Response | None:
         """Common checks: window open (else 404), then per-IP rate limit."""
-        if pairing.current_window(state) is None:
+        if state.lockdown or pairing.current_window(state) is None:
             return not_found()
         ip = client_ip(request)
         key = client_key(ip)

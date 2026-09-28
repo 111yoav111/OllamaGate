@@ -1,0 +1,77 @@
+Screen {
+    background: $surface;
+}
+
+.banner {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.warnings {
+    border: round $error;
+    padding: 0 1;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#status, #ollama, #log {
+    border: round $primary-darken-2;
+    padding: 0 1;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#device-search, #audit-filter {
+    margin: 0 0 1 0;
+}
+
+#device-table, #audit-table {
+    height: 1fr;
+}
+
+.qr {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+    background: white;
+    color: black;
+}
+
+.buttons {
+    height: auto;
+    margin: 1 0;
+}
+
+.buttons Button {
+    margin: 0 1 0 0;
+}
+
+.setting {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.setting-key {
+    width: 40;
+    padding: 1 1 0 0;
+}
+
+.setting-value {
+    width: 1fr;
+}
+
+ConfirmScreen, InputScreen, MessageScreen, LimitsScreen {
+    align: center middle;
+}
+
+.dialog {
+    width: 64;
+    height: auto;
+    border: thick $primary;
+    background: $panel;
+    padding: 1 2;
+}
+
+.dialog.wide {
+    width: 90;
+}

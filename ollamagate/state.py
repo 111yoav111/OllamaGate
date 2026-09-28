@@ -25,6 +25,7 @@ from .textsafe import safe_text
 MAX_IP_HISTORY = 20
 MAX_AUDIT_FIELD = 200
 NOISY_EVENTS_PER_MINUTE = 10
+USAGE_KEEP_DAYS = 62
 
 
 class DeviceStatus(str, enum.Enum):
@@ -89,6 +90,7 @@ class PairingWindow:
 class AuditEntry:
     ts: float
     event: str
+    seq: int = 0  # monotonically increasing; survives the ring buffer wrapping
     ip: str | None = None
     device_id: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)
@@ -105,6 +107,16 @@ class RequestLogEntry:
     duration_ms: int
     bytes_out: int
     outcome: str  # complete | client_disconnect | killed | upstream_error
+    model: str = ""
+
+
+@dataclass
+class UsageDay:
+    """Daily usage rollup for one device (tokens are filled in from Phase 4)."""
+
+    requests: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 @dataclass
@@ -115,6 +127,8 @@ class ActiveStream:
     path: str
     started_at: float
     token_hash: str = ""  # which credential opened it (matters during rotation grace)
+    model: str = ""
+    bytes_out: int = 0
     killed: asyncio.Event = field(default_factory=asyncio.Event)
     kill_reason: str = ""
 
@@ -131,6 +145,9 @@ def _clean(value: Any) -> Any:
     return value
 
 
+_ZERO_USAGE = UsageDay()  # returned by reads with no data; never mutated
+
+
 class State:
     def __init__(self, audit_size: int = 5000, request_log_size: int = 5000) -> None:
         self._devices: dict[str, Device] = {}
@@ -145,8 +162,16 @@ class State:
         # attacker can't flush real events out of the bounded audit log.
         self._noise_limiter = RateLimiter(NOISY_EVENTS_PER_MINUTE, 60.0)
         self.audit_suppressed = 0
+        self.audit_seq = 0
         self.started_at = time.time()
         self.version = 0
+        # Lockdown: reject all proxied traffic and pairing, but keep every device.
+        self.lockdown = False
+        # (device_id, "YYYY-MM-DD") -> usage for that local day
+        self.usage: dict[tuple[str, str], UsageDay] = {}
+        self._usage_month: dict[tuple[str, str], UsageDay] = {}  # (device_id, "YYYY-MM")
+        self._usage_total: dict[str, UsageDay] = {}
+        self._usage_all_day: dict[str, UsageDay] = {}  # "YYYY-MM-DD" -> all devices
 
     def _changed(self) -> None:
         self.version += 1
@@ -156,7 +181,9 @@ class State:
     def audit(
         self, event: str, *, ip: str | None = None, device_id: str | None = None, **detail: Any
     ) -> AuditEntry:
+        self.audit_seq += 1
         entry = AuditEntry(
+            seq=self.audit_seq,
             ts=time.time(),
             event=event,
             ip=_clean(ip),
@@ -177,6 +204,52 @@ class State:
 
     def log_request(self, entry: RequestLogEntry) -> None:
         self.request_log.append(entry)
+        self.add_usage(entry.device_id, requests=1)
+        self._changed()
+
+    def add_usage(self, device_id: str, requests: int = 0, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """Count usage into the day, month, lifetime and all-devices-today buckets.
+
+        Keeping running totals makes every read O(1), which matters because the
+        TUI reads them for every device on every redraw, on the proxy's loop.
+        """
+        day = time.strftime("%Y-%m-%d")
+        for key, bucket in (
+            ((device_id, day), self.usage),
+            ((device_id, day[:7]), self._usage_month),
+            (device_id, self._usage_total),
+            (day, self._usage_all_day),
+        ):
+            u = bucket.setdefault(key, UsageDay())
+            u.requests += requests
+            u.prompt_tokens += prompt_tokens
+            u.completion_tokens += completion_tokens
+
+    def usage_today(self, device_id: str) -> UsageDay:
+        return self.usage.get((device_id, time.strftime("%Y-%m-%d")), _ZERO_USAGE)
+
+    def usage_month(self, device_id: str) -> UsageDay:
+        return self._usage_month.get((device_id, time.strftime("%Y-%m")), _ZERO_USAGE)
+
+    def usage_lifetime(self, device_id: str) -> UsageDay:
+        return self._usage_total.get(device_id, _ZERO_USAGE)
+
+    def usage_all_today(self) -> UsageDay:
+        return self._usage_all_day.get(time.strftime("%Y-%m-%d"), _ZERO_USAGE)
+
+    def requests_last_minute(self, now: float | None = None) -> int:
+        cutoff = (time.time() if now is None else now) - 60
+        count = 0
+        for entry in reversed(self.request_log):
+            if entry.ts < cutoff:
+                break
+            count += 1
+        return count
+
+    def set_lockdown(self, on: bool) -> None:
+        self.lockdown = on
+        if on:
+            self.kill_all_streams("lockdown")
         self._changed()
 
     # ----- devices -------------------------------------------------------------
@@ -346,6 +419,12 @@ class State:
     def sweep(self, now: float | None = None) -> None:
         """Enforce time-based rules: expired tokens lose their streams, grace periods end."""
         now = time.time() if now is None else now
+        # Daily buckets older than ~2 months are no longer shown anywhere.
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(now - USAGE_KEEP_DAYS * 86400))
+        for key in [k for k in self.usage if k[1] < cutoff]:
+            del self.usage[key]
+        for key in [k for k in self._usage_all_day if k < cutoff]:
+            del self._usage_all_day[key]
         for device in self._devices.values():
             if device.previous_token_hash and (device.previous_token_valid_until or 0) <= now:
                 old = device.previous_token_hash

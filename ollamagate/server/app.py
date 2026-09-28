@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config import Config
 from ..state import RequestLogEntry, State
+from ..textsafe import safe_text
 from . import auth, pairing
 from .body import BodyTooLarge, read_body_limited
 from .netutil import parse_networks, resolve_client_ip
@@ -42,6 +44,22 @@ SWEEP_INTERVAL = 1.0
 
 def error(status: int, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status, headers=headers)
+
+
+def lockdown_response() -> JSONResponse:
+    return error(503, "server unavailable", {"Retry-After": "300"})
+
+
+def requested_model(body: bytes) -> str:
+    """Best-effort model name from a JSON request body, for display only."""
+    if not body.startswith(b"{"):
+        return ""
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        return ""
+    model = data.get("model") if isinstance(data, dict) else None
+    return safe_text(model, 100) if isinstance(model, str) else ""
 
 
 def unauthorized() -> JSONResponse:
@@ -150,11 +168,15 @@ def create_app(
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
+        if state.lockdown:  # don't even confirm the host is alive
+            return lockdown_response()
         return PlainTextResponse("ok")
 
     @app.get("/me", include_in_schema=False)
     async def me(request: Request) -> Response:
         """Lets a device see what the server knows about it."""
+        if state.lockdown:
+            return lockdown_response()
         outcome = auth.authenticate(state, auth.extract_bearer(request.headers))
         if outcome.result is not auth.AuthResult.OK or outcome.device is None:
             state.audit_noisy("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
@@ -184,7 +206,9 @@ def create_app(
         method, path = request.method, request.url.path
         token = auth.extract_bearer(request.headers)
 
-        # 1. (Phase 4) IP bans and lockdown are checked here, before auth.
+        # 1. Lockdown rejects everything before auth. (Phase 4: IP bans go here too.)
+        if state.lockdown:
+            return lockdown_response()
 
         # 2. Authenticate.
         outcome = auth.authenticate(state, token)
@@ -231,6 +255,7 @@ def create_app(
                     duration_ms=monotonic_ms(started),
                     bytes_out=bytes_out,
                     outcome=outcome_name,
+                    model=stream.model,
                 )
             )
 
@@ -260,6 +285,7 @@ def create_app(
                 finish("rejected", 401, 0)
                 return unauthorized()
 
+            stream.model = requested_model(body)
             # (Phase 4) body policy: model allowlist, num_ctx/num_predict clamps, usage injection.
 
             is_new_ip = state.touch_device(

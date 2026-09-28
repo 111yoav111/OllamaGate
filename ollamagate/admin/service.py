@@ -6,16 +6,30 @@ audit, and every action writes an audit entry.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import time
 from typing import Any
-
 from urllib.parse import urlsplit
 
-from ..config import Config, is_loopback_host
+from ..config import Config, ConfigError, is_loopback_host
 from ..server import auth, pairing
 from ..state import Device, DeviceStatus, State, WindowState
+from ..uaparse import summarize as summarize_ua
 from .errors import AdminError
+
+# "Seen recently" threshold for the yellow status dot.
+RECENT_SECONDS = 300
+
+# Settings that are safe to change while running: (section, key) -> type.
+RUNTIME_SETTINGS: dict[str, type] = {
+    "server.public_url": str,
+    "pairing.ttl_seconds": int,
+    "pairing.max_attempts": int,
+    "limits.max_concurrent": int,
+    "limits.allow_model_management": bool,
+}
+
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
@@ -24,9 +38,32 @@ def _is_int(value: object) -> bool:
 EXPIRY_PRESETS = {"never": None, "1d": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 
 
+def activity(device: Device, state: State, now: float | None = None) -> str:
+    """streaming | recent | idle | suspended | revoked (the TUI's colored dot)."""
+    if device.status is not DeviceStatus.ACTIVE:
+        return device.status.value
+    if state.device_streams(device.id):
+        return "streaming"
+    now = time.time() if now is None else now
+    if device.last_seen is not None and now - device.last_seen < RECENT_SECONDS:
+        return "recent"
+    return "idle"
+
+
 def device_view(device: Device, state: State) -> dict[str, Any]:
     """A JSON-safe view of a device. Never includes the token hash."""
+    streams = state.device_streams(device.id)
+    today = state.usage_today(device.id)
+    month = state.usage_month(device.id)
+    total = state.usage_lifetime(device.id)
     return {
+        "activity": activity(device, state),
+        "client": summarize_ua(device.user_agent),
+        "current_models": sorted({s.model for s in streams if s.model}),
+        "requests_today": today.requests,
+        "requests_month": month.requests,
+        "requests_total": total.requests,
+        "tokens_today": today.prompt_tokens + today.completion_tokens,
         "id": device.id,
         "name": device.name,
         "status": device.status.value,
@@ -163,6 +200,8 @@ class Admin:
     # ----- pairing ---------------------------------------------------------------
 
     def open_pairing(self, methods: list[str] | None = None, ttl: int | None = None) -> dict[str, Any]:
+        if self.state.lockdown:
+            raise AdminError("server is in lockdown; turn it off before pairing")
         if methods is not None and not isinstance(methods, list):
             raise AdminError("methods must be a list")
         methods_t = tuple(methods) if methods else pairing.METHODS
@@ -217,6 +256,75 @@ class Admin:
                 return result
         raise AdminError("unknown pairing window")
 
+    # ----- lockdown ------------------------------------------------------------------
+
+    def set_lockdown(self, on: bool) -> dict[str, Any]:
+        """Reject all traffic and close pairing, keeping every device and setting."""
+        if not isinstance(on, bool):
+            raise AdminError("on must be true or false")
+        if on:
+            pairing.close_window(self.state, WindowState.CANCELLED, reason="lockdown")
+        killed = len(self.state.streams) if on else 0
+        self.state.set_lockdown(on)
+        self._audit("lockdown_on" if on else "lockdown_off", streams_killed=killed)
+        return {"lockdown": self.state.lockdown, "streams_killed": killed}
+
+    # ----- settings ------------------------------------------------------------------
+
+    def get_settings(self) -> dict[str, Any]:
+        out = {}
+        for dotted in RUNTIME_SETTINGS:
+            section, key = dotted.split(".")
+            out[dotted] = getattr(getattr(self.config, section), key)
+        return out
+
+    def set_setting(self, key: str, value: Any) -> dict[str, Any]:
+        """Change a runtime-safe setting until restart (config.toml is not modified)."""
+        if key not in RUNTIME_SETTINGS:
+            raise AdminError(f"not changeable at runtime; allowed: {', '.join(RUNTIME_SETTINGS)}")
+        wanted = RUNTIME_SETTINGS[key]
+        if isinstance(value, str) and wanted is not str:
+            if wanted is bool and value.lower() in ("true", "false", "on", "off", "yes", "no"):
+                value = value.lower() in ("true", "on", "yes")
+            elif wanted is int and len(value) <= 12 and value.strip().isascii() and value.strip().lstrip("-").isdigit():
+                value = int(value)
+        if wanted is int and not _is_int(value) or wanted is not int and not isinstance(value, wanted):
+            raise AdminError(f"{key} must be {wanted.__name__}")
+        section, attr = key.split(".")
+        trial = copy.deepcopy(self.config)
+        setattr(getattr(trial, section), attr, value)
+        try:
+            trial.validate()
+        except ConfigError as exc:
+            raise AdminError(str(exc)) from None
+        old = getattr(getattr(self.config, section), attr)
+        setattr(getattr(self.config, section), attr, value)
+        self._audit("setting", key=key, old=str(old), new=str(value))
+        return self.get_settings()
+
+    # ----- dashboard -------------------------------------------------------------------
+
+    def dashboard(self) -> dict[str, Any]:
+        state = self.state
+        window = pairing.current_window(state)
+        today = state.usage_all_today()
+        return {
+            "base_url": self.config.base_url,
+            "tls_mode": self.config.tls.mode,
+            "network_mode": self.config.network.mode,
+            "fingerprint": self.fingerprint,
+            "uptime": time.time() - state.started_at,
+            "lockdown": state.lockdown,
+            "devices": len(state.list_devices()),
+            "devices_active": sum(1 for d in state.list_devices() if d.status is DeviceStatus.ACTIVE),
+            "active_streams": len(state.streams),
+            "requests_last_minute": state.requests_last_minute(),
+            "requests_today": today.requests,
+            "tokens_today": today.prompt_tokens + today.completion_tokens,
+            "pairing": None if window is None else {"expires_at": window.expires_at, "attempts": window.attempts},
+            "audit_suppressed": state.audit_suppressed,
+        }
+
     # ----- logs --------------------------------------------------------------------
 
     def audit_log(self, limit: int = 50, event: str | None = None) -> list[dict[str, Any]]:
@@ -244,6 +352,10 @@ class Admin:
         "devices.kick": "kick",
         "devices.expiry": "set_expiry",
         "devices.model_management": "set_model_management",
+        "lockdown.set": "set_lockdown",
+        "settings.get": "get_settings",
+        "settings.set": "set_setting",
+        "dashboard": "dashboard",
         "pairing.open": "open_pairing",
         "pairing.cancel": "cancel_pairing",
         "pairing.status": "pairing_status",

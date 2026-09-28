@@ -12,7 +12,7 @@ someone who knows the address, scans for Ollama, or sniffs the network.
 **Assets:** the models and GPU time, the prompts/responses of paired devices,
 and the host machine itself.
 
-## What's protected (Phases 1-2)
+## What's protected (Phases 1-3)
 
 - **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
   owner has a pairing window open) requires a device token.
@@ -83,6 +83,26 @@ and the host machine itself.
   symlinks). A second instance using the same config directory is refused.
   There is no remote admin API. Admin actions are audited. Device views never
   include token hashes.
+- **Admin TUI.** Runs inside the server process and acts only through the same
+  audited admin service as the CLI; it has no network surface. Client-supplied
+  text (device names, user agents, paths, model names) is rendered as literal
+  text, never as Rich/Textual markup (toasts included), with control characters
+  escaped and long values cut *before* escaping. Logs, including uvicorn's, go
+  to an in-memory buffer shown on the dashboard, never to the terminal under
+  the TUI. Revoke, rotate, suspend, kick, lockdown and quit (also Ctrl+Q) ask
+  for confirmation, and the default button is "No". If the TUI ever crashes,
+  the server keeps running headless instead of dropping every device. Redraws
+  are throttled to once a second and limited to the visible tab, so a request
+  flood can't starve the proxy through the shared event loop.
+- **Lockdown** (`Ctrl+L` / `ollamagate lockdown on`) rejects every request
+  before authentication - `/healthz` included, so the host doesn't even look
+  alive - cuts all streams and refuses pairing while keeping all devices.
+- **Runtime settings** are limited to a small allowlist (public URL, pairing
+  TTL/attempts, default concurrency, default model-management grant), are
+  validated like the config file, audited, and never written to disk.
+  `server.public_url` must be `https://host[:port]` (plain `http` only for
+  loopback) with no path, query, fragment or credentials, since it is embedded
+  in pairing links and QR codes.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 

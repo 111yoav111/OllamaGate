@@ -4,9 +4,9 @@ A secure pairing proxy that lets your own devices use the Ollama models on your
 home PC over the internet. Knowing the server's address gives no access: a device
 has to **pair** first (code, QR or link), then it gets its own revocable token.
 
-> **Status:** Phases 1-2 are done: TLS, a hardened streaming passthrough to
-> Ollama, pairing by code / QR / link, and device management from the CLI.
-> The admin TUI and quotas come next (see the roadmap below).
+> **Status:** Phases 1-3 are done: TLS, a hardened streaming passthrough to
+> Ollama, pairing by code / QR / link, and a live admin TUI plus CLI.
+> Quotas, rate limits and auto-bans come next (see the roadmap below).
 
 ## Requirements
 
@@ -23,9 +23,32 @@ python -m venv .venv
 ## Run
 
 ```bash
-ollamagate serve                 # terminal 1: run the server (headless for now)
-ollamagate pair                  # terminal 2: open a pairing window
+ollamagate serve                 # server + admin TUI in this terminal
+ollamagate serve --no-tui        # headless; manage it with the CLI commands below
 ```
+
+### Admin TUI
+
+| Tab | Shows |
+|---|---|
+| **1 Dashboard** | public URL, TLS fingerprint, uptime, devices, active streams, requests/min, Ollama version and loaded models (VRAM), security warnings, recent log |
+| **2 Devices** | live table: status dot (🟢 streaming · 🟡 seen < 5 min · ⚪ idle · 🔴 suspended/revoked), name, IP, client/OS, pairing method, last seen, current model, requests today |
+| **3 Pairing** | code, QR, link and countdown; a notice when a device pairs |
+| **4 Audit log** | filterable security events (pairings, failed logins, admin actions…) |
+| **5 Settings** | runtime-changeable settings (until restart) |
+
+Keys: `P` pair · `Enter` device details · `R` revoke · `T` rotate token ·
+`S` suspend/resume · `K` kick · `N` rename · `L` limits (token expiry, model
+management) · `O` notes (in details) · `/` search · `Ctrl+L` **LOCKDOWN** ·
+`Q` quit. Destructive actions ask for confirmation.
+
+**Lockdown** rejects all traffic (`503`), cuts every stream and closes pairing,
+but keeps all devices; press `Ctrl+L` again (or `ollamagate lockdown off`) to
+resume.
+
+### Pairing a device
+
+Press `P` in the TUI or run `ollamagate pair` in another terminal.
 
 `ollamagate pair` shows three ways to pair, valid for 5 minutes and for one
 device only:
@@ -62,6 +85,10 @@ ollamagate devices revoke <id>           # must pair again
 ollamagate devices rotate <id> [--grace 60]   # prints a new token once
 ollamagate devices expiry <id> never|1d|7d|30d|<seconds>
 ollamagate audit [--event pairing]
+ollamagate status                        # the dashboard, for scripts / headless mode
+ollamagate lockdown on|off
+ollamagate settings list
+ollamagate settings set server.public_url https://my-pc.tailnet.ts.net:8443
 ollamagate doctor                        # checks Ollama binding, permissions, TLS
 ```
 
@@ -114,6 +141,6 @@ Everything else returns `404`. Model management (`pull`, `push`, `delete`,
 
 1. ~~Foundation~~
 2. ~~Pairing (code / QR / link) and device management CLI~~
-3. Admin TUI
+3. ~~Admin TUI~~
 4. Quotas, rate limits, auto-bans, lockdown
 5. Tailscale / Cloudflare / Let's Encrypt modes, service install, packaging
