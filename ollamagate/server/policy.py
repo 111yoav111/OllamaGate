@@ -1,9 +1,14 @@
-"""Request policy: which Ollama endpoints exist and who may call them."""
+"""Request policy: which Ollama endpoints exist, who may call them, and how
+request bodies are checked and clamped against a device's limits."""
 
 from __future__ import annotations
 
 import enum
+import json
 import re
+from dataclasses import dataclass
+
+from ..state import DeviceLimits
 
 
 class EndpointKind(enum.Enum):
@@ -49,3 +54,190 @@ def classify_endpoint(method: str, path: str) -> EndpointKind | None:
     if method == "GET" and len(path) <= 256 and _MODEL_RE.match(path) and ".." not in path and not path.endswith("/"):
         return EndpointKind.INFERENCE
     return None
+
+
+# ----- body policy ----------------------------------------------------------------------
+
+# Endpoints whose JSON body names a model that must be on the device's allowlist.
+_MODEL_ENDPOINTS = {
+    "/api/generate", "/api/chat", "/api/embed", "/api/embeddings", "/api/show",
+    "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+}
+# Endpoints that generate text (and therefore get output-length clamps).
+_GENERATE_API = {"/api/generate", "/api/chat"}
+_GENERATE_V1 = {"/v1/chat/completions", "/v1/completions"}
+# Endpoints whose token usage counts against quotas.
+ACCOUNTED_ENDPOINTS = _MODEL_ENDPOINTS - {"/api/show"}
+MAX_KEEP_ALIVE_SECONDS = 30 * 60
+
+
+@dataclass
+class PolicyResult:
+    body: bytes
+    model: str = ""
+    error: str | None = None  # set => reject with ``status``
+    status: int = 400
+    streaming: bool = False
+
+
+def normalize_model(name: str) -> str:
+    """"llama3" and "llama3:latest" are the same model to Ollama."""
+    name = name.strip().lower()
+    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+
+
+def model_allowed(limits: DeviceLimits, model: str) -> bool:
+    if not limits.allowed_models:
+        return True
+    wanted = normalize_model(model)
+    return any(normalize_model(m) == wanted for m in limits.allowed_models)
+
+
+def _keep_alive_seconds(value: object) -> float | None:
+    """Ollama accepts numbers (seconds) or durations like "5m"; None if unparseable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        units = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+        for suffix in ("ms", "s", "m", "h"):
+            if value.endswith(suffix):
+                try:
+                    return float(value[: -len(suffix)]) * units[suffix]
+                except ValueError:
+                    return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _clamp_int(value: object, maximum: int) -> int:
+    """Clamp a client-supplied limit; anything missing, negative ("infinite") or bogus -> maximum."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return maximum
+    return int(min(value, maximum))
+
+
+# Ollama decodes bodies with Go's encoding/json, which matches struct field
+# names case-insensitively (with Unicode folding: "ſtream" == "stream") and lets
+# the last match win. A body with both "model" and "MODEL" would therefore pass
+# our checks on one key while Ollama used the other. So where Go does struct
+# matching (top level, options, stream_options) only plain lowercase ASCII keys
+# are accepted - every real field name is written that way anyway.
+_PLAIN_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
+_NATIVE_OPTION_ENDPOINTS = {"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"}
+
+
+def _keys_are_plain(obj: dict) -> bool:
+    return all(_PLAIN_KEY.match(k) for k in obj)
+
+
+def apply_body_policy(
+    limits: DeviceLimits, path: str, body: bytes, remaining_tokens: int | None = None
+) -> PolicyResult:
+    """Validate and rewrite a request body according to the device's limits.
+
+    Only JSON bodies of model endpoints are touched; the rewritten body is
+    re-serialised only when something changed. ``remaining_tokens`` (when a
+    quota applies) further caps the output length so one request can't
+    overshoot the quota by much.
+    """
+    if path not in _MODEL_ENDPOINTS:
+        return PolicyResult(body)
+    try:
+        data = json.loads(body) if body else None
+    except (ValueError, RecursionError):
+        return PolicyResult(body, error="request body must be JSON")
+    if not isinstance(data, dict):
+        return PolicyResult(body, error="request body must be a JSON object")
+    for obj in (data, data.get("options"), data.get("stream_options")):
+        if isinstance(obj, dict) and not _keys_are_plain(obj):
+            return PolicyResult(body, error="request keys must be lowercase field names")
+    model = data.get("model")
+    if not isinstance(model, str) or not model or len(model) > 200:
+        return PolicyResult(body, error="a model name is required")
+    if not model_allowed(limits, model):
+        return PolicyResult(body, model=model, error="model not allowed for this device", status=403)
+
+    max_predict = limits.max_num_predict
+    if remaining_tokens is not None:
+        max_predict = max(1, min(max_predict, remaining_tokens) if max_predict else remaining_tokens)
+
+    changed = False
+    streaming = False
+    if path in _NATIVE_OPTION_ENDPOINTS:
+        options = data.get("options")
+        if options is None:
+            options = {}
+        if not isinstance(options, dict):
+            return PolicyResult(body, model=model, error="options must be an object")
+        caps = []
+        # num_ctx is only clamped when asked for: adding it would override Ollama's
+        # own default (and force model reloads when clients mix settings).
+        # Embeddings load a context too, so they are covered.
+        if "num_ctx" in options:
+            caps.append(("num_ctx", limits.max_num_ctx))
+        # num_predict is always set for generation, so every answer is bounded.
+        if path in _GENERATE_API:
+            caps.append(("num_predict", max_predict))
+        for key, maximum in caps:
+            if maximum > 0:
+                clamped = _clamp_int(options.get(key), maximum)
+                if options.get(key) != clamped:
+                    options[key] = clamped
+                    changed = True
+        if options or "options" in data:
+            data["options"] = options
+        if path in _GENERATE_API:
+            streaming = data.get("stream", True) is not False  # Ollama streams by default
+    elif path in _GENERATE_V1:
+        if max_predict > 0:
+            for key in ("max_tokens", "max_completion_tokens"):
+                if key in data or key == "max_tokens":
+                    clamped = _clamp_int(data.get(key), max_predict)
+                    if data.get(key) != clamped:
+                        data[key] = clamped
+                        changed = True
+        streaming = data.get("stream") is True
+        if streaming:
+            # Ask for a final usage chunk so the stream can be accounted for.
+            opts = data.get("stream_options")
+            if not isinstance(opts, dict):
+                opts = {}
+            if opts.get("include_usage") is not True:
+                opts["include_usage"] = True
+                data["stream_options"] = opts
+                changed = True
+
+    if "keep_alive" in data:
+        seconds = _keep_alive_seconds(data["keep_alive"])
+        if seconds is None or seconds < 0 or seconds > MAX_KEEP_ALIVE_SECONDS:
+            data["keep_alive"] = f"{MAX_KEEP_ALIVE_SECONDS // 60}m"
+            changed = True
+
+    new_body = json.dumps(data).encode() if changed else body
+    return PolicyResult(new_body, model=model, streaming=streaming)
+
+
+def filter_model_list(limits: DeviceLimits, path: str, body: bytes) -> bytes:
+    """Hide models the device may not use from /api/tags, /api/ps and /v1/models.
+
+    Fails closed: anything that doesn't look like a model list comes back empty.
+    """
+    if not limits.allowed_models:
+        return body
+    list_key, name_key = ("data", "id") if path == "/v1/models" else ("models", "name")
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get(list_key), list):
+        return json.dumps({list_key: []}).encode()
+    data[list_key] = [
+        m for m in data[list_key]
+        if isinstance(m, dict) and isinstance(m.get(name_key), str) and model_allowed(limits, m[name_key])
+    ]
+    return json.dumps(data).encode()

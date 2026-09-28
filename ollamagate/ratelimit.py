@@ -35,9 +35,13 @@ class RateLimiter:
         while hits and hits[0] <= cutoff:
             hits.popleft()
 
-    def hit(self, key: str, now: float | None = None) -> bool:
-        """Record a hit for ``key``. Returns False if the key is over its limit."""
+    def hit(self, key: str, now: float | None = None, limit: int | None = None) -> bool:
+        """Record a hit for ``key``. Returns False if the key is over its limit.
+
+        ``limit`` overrides the default for this key (e.g. per-device limits).
+        """
         now = time.monotonic() if now is None else now
+        limit = self.limit if limit is None else limit
         hits = self._hits.get(key)
         if hits is None:
             if len(self._hits) >= self.max_keys:
@@ -46,14 +50,18 @@ class RateLimiter:
         else:
             self._hits.move_to_end(key)
         self._prune(hits, now)
-        if len(hits) >= self.limit:
+        if len(hits) >= limit:
             return False
         hits.append(now)
         return True
 
-    def retry_after(self, key: str, now: float | None = None) -> int:
+    def retry_after(self, key: str, now: float | None = None, limit: int | None = None) -> int:
+        """Seconds until ``key`` may hit again (under ``limit`` if it differs from the default)."""
         now = time.monotonic() if now is None else now
+        limit = self.limit if limit is None else limit
         hits = self._hits.get(key)
-        if not hits:
+        if not hits or len(hits) < limit:
             return 0
-        return max(1, int(hits[0] + self.window - now) + 1)
+        # The hit that has to expire before a new one fits (limits can shrink at runtime).
+        oldest_blocking = hits[len(hits) - limit]
+        return max(1, int(oldest_blocking + self.window - now) + 1)

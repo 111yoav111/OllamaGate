@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import secrets
 import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from .bans import BanList
 from .ratelimit import RateLimiter, client_key
 from .textsafe import safe_text
 
@@ -41,6 +43,36 @@ class IPRecord:
     count: int = 1
 
 
+PRIORITIES = ("low", "normal", "high")
+
+
+@dataclass
+class DeviceLimits:
+    """Per-device usage limits. 0 means unlimited for the token quotas."""
+
+    tokens_per_day: int = 0
+    tokens_per_month: int = 0
+    requests_per_minute: int = 60
+    max_concurrent: int = 2
+    max_num_ctx: int = 8192
+    max_num_predict: int = 4096
+    allowed_models: list[str] = field(default_factory=list)  # empty = all models
+    priority: str = "normal"
+
+    @classmethod
+    def from_config(cls, limits: Any) -> "DeviceLimits":
+        return cls(
+            tokens_per_day=limits.tokens_per_day,
+            tokens_per_month=limits.tokens_per_month,
+            requests_per_minute=limits.requests_per_minute,
+            max_concurrent=limits.max_concurrent,
+            max_num_ctx=limits.max_num_ctx,
+            max_num_predict=limits.max_num_predict,
+            allowed_models=list(limits.allowed_models),
+            priority=limits.priority,
+        )
+
+
 @dataclass
 class Device:
     id: str
@@ -61,6 +93,7 @@ class Device:
     last_port: int | None = None
     user_agent: str = ""
     allow_model_management: bool = False
+    limits: DeviceLimits = field(default_factory=DeviceLimits)
     ip_history: "OrderedDict[str, IPRecord]" = field(default_factory=OrderedDict)
 
 
@@ -129,6 +162,7 @@ class ActiveStream:
     token_hash: str = ""  # which credential opened it (matters during rotation grace)
     model: str = ""
     bytes_out: int = 0
+    usage: Any = None  # the stream's UsageCounter, for live tokens/sec
     killed: asyncio.Event = field(default_factory=asyncio.Event)
     kill_reason: str = ""
 
@@ -149,7 +183,9 @@ _ZERO_USAGE = UsageDay()  # returned by reads with no data; never mutated
 
 
 class State:
-    def __init__(self, audit_size: int = 5000, request_log_size: int = 5000) -> None:
+    def __init__(
+        self, audit_size: int = 5000, request_log_size: int = 5000, bans: BanList | None = None
+    ) -> None:
         self._devices: dict[str, Device] = {}
         self._device_by_token_hash: dict[str, str] = {}
         self.audit_log: deque[AuditEntry] = deque(maxlen=audit_size)
@@ -167,6 +203,11 @@ class State:
         self.version = 0
         # Lockdown: reject all proxied traffic and pairing, but keep every device.
         self.lockdown = False
+        # Signs browser CSRF tokens; new on every start, like everything else.
+        self.csrf_key = secrets.token_bytes(32)
+        self.bans = bans or BanList()
+        # Per-device requests-per-minute accounting (limits vary per device).
+        self.device_rpm = RateLimiter(60, 60.0)
         # (device_id, "YYYY-MM-DD") -> usage for that local day
         self.usage: dict[tuple[str, str], UsageDay] = {}
         self._usage_month: dict[tuple[str, str], UsageDay] = {}  # (device_id, "YYYY-MM")
@@ -263,6 +304,7 @@ class State:
         paired_via: str,
         allow_model_management: bool = False,
         token_expires_at: float | None = None,
+        limits: DeviceLimits | None = None,
     ) -> Device:
         if token_hash in self._device_by_token_hash:
             raise ValueError("token hash collision")
@@ -275,6 +317,7 @@ class State:
             paired_at=time.time(),
             allow_model_management=allow_model_management,
             token_expires_at=token_expires_at,
+            limits=limits or DeviceLimits(),
         )
         self._devices[device.id] = device
         self._device_by_token_hash[token_hash] = device.id
@@ -305,7 +348,7 @@ class State:
 
     def update_device(self, device_id: str, **fields: Any) -> Device:
         """Change plain descriptive fields (name, notes, expiry, permissions)."""
-        allowed = {"name", "notes", "token_expires_at", "allow_model_management"}
+        allowed = {"name", "notes", "token_expires_at", "allow_model_management", "limits"}
         if not set(fields) <= allowed:
             raise ValueError(f"cannot update {set(fields) - allowed}")
         device = self._devices[device_id]
@@ -419,6 +462,7 @@ class State:
     def sweep(self, now: float | None = None) -> None:
         """Enforce time-based rules: expired tokens lose their streams, grace periods end."""
         now = time.time() if now is None else now
+        self.bans.sweep(now)
         # Daily buckets older than ~2 months are no longer shown anywhere.
         cutoff = time.strftime("%Y-%m-%d", time.localtime(now - USAGE_KEEP_DAYS * 86400))
         for key in [k for k in self.usage if k[1] < cutoff]:

@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import copy
 import inspect
+import ipaddress
 import time
+from dataclasses import asdict, fields, replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from ..config import Config, ConfigError, is_loopback_host
 from ..server import auth, pairing
-from ..state import Device, DeviceStatus, State, WindowState
+from ..state import PRIORITIES, Device, DeviceLimits, DeviceStatus, State, WindowState
 from ..uaparse import summarize as summarize_ua
 from .errors import AdminError
 
@@ -64,6 +66,12 @@ def device_view(device: Device, state: State) -> dict[str, Any]:
         "requests_month": month.requests,
         "requests_total": total.requests,
         "tokens_today": today.prompt_tokens + today.completion_tokens,
+        "tokens_month": month.prompt_tokens + month.completion_tokens,
+        "tokens_total": total.prompt_tokens + total.completion_tokens,
+        "tokens_per_second": round(
+            sum(s.usage.chunks / max(time.time() - s.started_at, 0.001) for s in streams if s.usage is not None), 1
+        ),
+        "limits": asdict(device.limits),
         "id": device.id,
         "name": device.name,
         "status": device.status.value,
@@ -197,6 +205,89 @@ class Admin:
         self._audit("expiry", device, expires_at=expires_at)
         return device_view(device, self.state)
 
+    def set_limits(self, ref: str, **changes: Any) -> dict[str, Any]:
+        """Change some of a device's limits (live, until restart)."""
+        device = self._device(ref)
+        known = {f.name for f in fields(DeviceLimits)}
+        unknown = set(changes) - known
+        if unknown:
+            raise AdminError(f"unknown limit(s) {', '.join(sorted(unknown))}; known: {', '.join(sorted(known))}")
+        clean: dict[str, Any] = {}
+        for key, value in changes.items():
+            if key == "allowed_models":
+                if isinstance(value, str):
+                    value = [v.strip() for v in value.split(",") if v.strip()]
+                if not isinstance(value, list) or not all(isinstance(v, str) and 0 < len(v) <= 200 for v in value):
+                    raise AdminError("allowed_models must be a list of model names (empty = all)")
+                if len(value) > 100:
+                    raise AdminError("at most 100 allowed models")
+                clean[key] = value
+            elif key == "priority":
+                if value not in PRIORITIES:
+                    raise AdminError("priority must be low, normal or high")
+                clean[key] = value
+            else:
+                if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 12:
+                    value = int(value)
+                if not _is_int(value) or not (0 <= value <= 10**12):
+                    raise AdminError(f"{key} must be a whole number >= 0")
+                if key == "max_concurrent" and value < 1:
+                    raise AdminError("max_concurrent must be at least 1")
+                clean[key] = value
+        new = replace(device.limits, **clean)
+        self.state.update_device(device.id, limits=new)
+        self._audit("limits", device, **{k: str(v) for k, v in clean.items()})
+        return device_view(device, self.state)
+
+    # ----- bans ------------------------------------------------------------------
+
+    def list_bans(self) -> list[dict[str, Any]]:
+        now = time.time()
+        return [
+            {"key": b.key, "reason": b.reason, "created_at": b.created_at, "until": b.until,
+             "manual": b.manual, "strikes": b.strikes}
+            for b in self.state.bans.bans.values()
+            if b.active(now)
+        ]
+
+    def add_ban(self, ip: str, seconds: int | None = None, reason: str = "manual") -> dict[str, Any]:
+        if not isinstance(ip, str):
+            raise AdminError("ip must be text")
+        try:
+            addr = ipaddress.ip_address(ip.strip())
+        except ValueError:
+            raise AdminError(f"not an IP address: {ip!r}") from None
+        if addr.is_loopback:
+            raise AdminError("refusing to ban loopback (that's you)")
+        if seconds is not None and (not _is_int(seconds) or seconds < 60):
+            raise AdminError("seconds must be at least 60 (or omitted for until-lifted)")
+        if not isinstance(reason, str) or len(reason) > 200:
+            raise AdminError("reason must be short text")
+        ban = self.state.bans.ban(str(addr), reason, seconds)
+        # Cut everything that is currently streaming from that client.
+        killed = 0
+        for d in self.state.list_devices():
+            if d.last_ip is not None and self.state.bans.banned(d.last_ip) is ban:
+                killed += self.state.kill_device_streams(d.id, "IP banned")
+        self._audit("ban", ip=str(addr), key=ban.key, seconds=seconds, reason=reason, streams_killed=killed)
+        self.state._changed()
+        return {"key": ban.key, "until": ban.until, "streams_killed": killed}
+
+    def remove_ban(self, ip: str) -> dict[str, Any]:
+        if not isinstance(ip, str):
+            raise AdminError("ip must be text")
+        removed = self.state.bans.unban(ip.strip())
+        if removed:
+            self._audit("unban", ip=ip.strip())
+            self.state._changed()
+        return {"removed": removed}
+
+    def ban_device_ip(self, ref: str, seconds: int | None = None) -> dict[str, Any]:
+        device = self._device(ref)
+        if not device.last_ip:
+            raise AdminError("this device has no known IP yet")
+        return self.add_ban(device.last_ip, seconds, reason=f"banned from device {device.id[:8]}")
+
     # ----- pairing ---------------------------------------------------------------
 
     def open_pairing(self, methods: list[str] | None = None, ttl: int | None = None) -> dict[str, Any]:
@@ -323,6 +414,7 @@ class Admin:
             "tokens_today": today.prompt_tokens + today.completion_tokens,
             "pairing": None if window is None else {"expires_at": window.expires_at, "attempts": window.attempts},
             "audit_suppressed": state.audit_suppressed,
+            "bans": len(self.list_bans()),
         }
 
     # ----- logs --------------------------------------------------------------------
@@ -352,6 +444,11 @@ class Admin:
         "devices.kick": "kick",
         "devices.expiry": "set_expiry",
         "devices.model_management": "set_model_management",
+        "devices.limits": "set_limits",
+        "devices.ban_ip": "ban_device_ip",
+        "bans.list": "list_bans",
+        "bans.add": "add_ban",
+        "bans.remove": "remove_ban",
         "lockdown.set": "set_lockdown",
         "settings.get": "get_settings",
         "settings.set": "set_setting",

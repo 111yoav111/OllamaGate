@@ -37,6 +37,13 @@ from .widgets import ACTIVITY_DOT, ConfirmScreen, InputScreen, MessageScreen, ag
 
 log = logging.getLogger("ollamagate.tui")
 
+
+def _quota(used: int, limit: int) -> str:
+    """ "1200", or "1200/5000 (24%)" when there is a daily quota."""
+    if not limit:
+        return str(used)
+    return f"{used}/{limit} ({min(100, used * 100 // limit)}%)"
+
 REFRESH_INTERVAL = 1.0  # redraws share the proxy's event loop; keep them rare
 OLLAMA_POLL_INTERVAL = 5.0
 
@@ -57,6 +64,10 @@ class DeviceTable(DataTable):
     ]
 
 
+class BanTable(DataTable):
+    BINDINGS = [Binding("u", "app.unban", "Lift ban")]
+
+
 class GateTUI(App[None]):
     TITLE = "OllamaGate"
     CSS_PATH = "gate.tcss"
@@ -72,7 +83,8 @@ class GateTUI(App[None]):
         Binding("2", "tab('devices')", "Devices", show=False),
         Binding("3", "tab('pairing')", "Pairing", show=False),
         Binding("4", "tab('audit')", "Audit", show=False),
-        Binding("5", "tab('settings')", "Settings", show=False),
+        Binding("5", "tab('bans')", "Bans", show=False),
+        Binding("6", "tab('settings')", "Settings", show=False),
     ]
 
     def __init__(
@@ -128,10 +140,20 @@ class GateTUI(App[None]):
             with TabPane("Audit log", id="audit"):
                 yield Input(placeholder="Filter by event or text, e.g. pairing, auth_failed, 203.0.113.", id="audit-filter")
                 yield DataTable(id="audit-table", cursor_type="row", zebra_stripes=True)
+            with TabPane("Bans", id="bans"):
+                with Horizontal(classes="buttons"):
+                    yield Button("Ban an IP…", id="ban-add", variant="error")
+                    yield Button("Lift selected ban (U)", id="ban-remove")
+                yield BanTable(id="ban-table", cursor_type="row", zebra_stripes=True)
             with TabPane("Settings", id="settings"):
                 with VerticalScroll():
                     yield Static(
-                        Text("Runtime changes last until restart; edit config.toml to keep them.", style="dim")
+                        Text(
+                            "Runtime changes last until restart; edit config.toml to keep them.\n"
+                            "limits.* are defaults for devices paired from now on; "
+                            "change an existing device's limits with L on the Devices tab.",
+                            style="dim",
+                        )
                     )
                     for key in RUNTIME_SETTINGS:
                         with Horizontal(classes="setting"):
@@ -142,7 +164,10 @@ class GateTUI(App[None]):
 
     def on_mount(self) -> None:
         devices = self._q("#device-table", DataTable)
-        self._device_columns = devices.add_columns("", "Name", "ID", "IP", "Client", "Via", "Last seen", "Now", "Req today")
+        self._device_columns = devices.add_columns(
+            "", "Name", "ID", "IP", "Client", "Via", "Last seen", "Now", "Req today", "Tokens today"
+        )
+        self._q("#ban-table", DataTable).add_columns("Client", "Until", "Kind", "Reason")
         audit = self._q("#audit-table", DataTable)
         audit.add_columns("Time", "Event", "IP", "Device", "Detail")
         self._fill_settings()
@@ -195,6 +220,8 @@ class GateTUI(App[None]):
             self._update_devices()
         elif tab == "audit":
             self._update_audit()
+        elif tab == "bans":
+            self._update_bans()
         elif tab == "settings":
             self._fill_settings(only_unfocused=True)
         self._update_pairing()
@@ -222,6 +249,8 @@ class GateTUI(App[None]):
                 self.say(f"New device paired: {name}", title="Pairing", timeout=8)
             elif e.event == "device_new_ip":
                 self.say(f"{name} connected from a new IP: {e.ip}", title="New IP", severity="warning", timeout=8)
+            elif e.event == "ban_auto":
+                self.say(f"Banned {e.detail.get('reason', '')}: {e.ip}", title="Auto-ban", severity="warning", timeout=8)
             elif e.event == "pairing_destroyed":
                 self.say("Pairing window destroyed after too many wrong attempts", severity="error")
 
@@ -256,7 +285,8 @@ class GateTUI(App[None]):
             ("Devices", f"{d['devices_active']} active / {d['devices']} total"),
             ("Active streams", str(d["active_streams"])),
             ("Requests", f"{d['requests_last_minute']}/min · {d['requests_today']} today"),
-            ("Tokens today", f"{d['tokens_today']}" if d["tokens_today"] else "- (counted from Phase 4)"),
+            ("Tokens today", str(d["tokens_today"])),
+            ("Banned clients", str(d["bans"])),
             ("Pairing", "closed" if pairing is None else f"OPEN · {int(pairing['expires_at'] - time.time())}s left"),
         ]
         if d["audit_suppressed"]:
@@ -289,6 +319,8 @@ class GateTUI(App[None]):
             if needle and needle not in haystack:
                 continue
             now = ", ".join(d["current_models"]) or (f"{d['active_streams']} stream(s)" if d["active_streams"] else "")
+            if d["tokens_per_second"]:
+                now += f" · {d['tokens_per_second']} tok/s"
             cells = [
                 ACTIVITY_DOT.get(d["activity"], Text("?")),
                 t(d["name"]),
@@ -299,6 +331,7 @@ class GateTUI(App[None]):
                 t(ago(d["last_seen"])),
                 t(now),
                 t(d["requests_today"]),
+                t(_quota(d["tokens_today"], d["limits"]["tokens_per_day"])),
             ]
             rows.append((d["id"], cells))
         current = [row.key.value for row in table.ordered_rows]
@@ -342,6 +375,22 @@ class GateTUI(App[None]):
                 table.move_cursor(row=table.get_row_index(selected), scroll=False)
             except Exception:  # noqa: BLE001 - the entry fell out of the view
                 pass
+
+    def _update_bans(self) -> None:
+        table = self._q("#ban-table", DataTable)
+        bans = sorted(self.admin.list_bans(), key=lambda b: b["created_at"], reverse=True)
+        if [row.key.value for row in table.ordered_rows] == [b["key"] for b in bans]:
+            return  # unchanged: don't rebuild (keeps the cursor where the owner put it)
+        selected = None
+        if table.row_count:
+            selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        table.clear()
+        for b in bans:
+            until = "until lifted" if b["until"] is None else ts(b["until"])
+            kind = "manual" if b["manual"] else f"auto (strike {b['strikes']})"
+            table.add_row(t(b["key"]), t(until), t(kind), t(b["reason"]), key=b["key"])
+        if selected in [b["key"] for b in bans]:
+            table.move_cursor(row=table.get_row_index(selected))
 
     def _update_pairing(self) -> None:
         info = self._q("#pairing-info", Static)
@@ -475,6 +524,7 @@ class GateTUI(App[None]):
             "devices": "#device-table",
             "audit": "#audit-table",
             "pairing": "#pair-open",
+            "bans": "#ban-table",
             "settings": "#set-server-public_url",
         }.get(tab)
         if target:
@@ -614,7 +664,26 @@ class GateTUI(App[None]):
         self._with_device(lambda d: self.push_screen(LimitsScreen(d["id"])))
 
     def action_device_ban(self) -> None:
-        self.say("IP bans arrive in Phase 4 (policy & auto-bans).", severity="warning")
+        def ask(d: dict[str, Any]) -> None:
+            if not d["last_ip"]:
+                self.say("This device has no known IP yet", severity="warning")
+                return
+            self.push_screen(
+                ConfirmScreen(f"Ban {d['last_ip']} (last IP of {t(d['name']).plain}) until you lift it?"),
+                lambda ok: ok and self._run_admin(self.admin.ban_device_ip, d["id"]),
+            )
+
+        self._with_device(ask)
+
+    def action_unban(self) -> None:
+        table = self._q("#ban-table", DataTable)
+        if table.row_count == 0:
+            return
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        self.push_screen(
+            ConfirmScreen(f"Lift the ban on {key}?", danger=False),
+            lambda ok: ok and self._run_admin(self.admin.remove_ban, key),
+        )
 
     # ----- events -------------------------------------------------------------------------
 
@@ -646,6 +715,13 @@ class GateTUI(App[None]):
             window_id = self._pairing["window_id"] if self._pairing else None
             if self._run_admin(self.admin.cancel_pairing, window_id) is not None and window_id is None:
                 self.say("No pairing window of yours is open")
+        elif bid == "ban-add":
+            self.push_screen(
+                InputScreen("IP address to ban (until lifted):", placeholder="203.0.113.7"),
+                lambda ip: ip and self._run_admin(self.admin.add_ban, ip.strip()),
+            )
+        elif bid == "ban-remove":
+            self.action_unban()
         elif bid.startswith("save-"):
             self._save_setting(bid.removeprefix("save-"))
 

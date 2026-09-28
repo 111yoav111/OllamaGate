@@ -7,6 +7,7 @@
 
 [server]
 host = "127.0.0.1"          # interface to listen on (e.g. your Tailscale IP)
+max_upstream_concurrency = 4 # requests sent to Ollama at once; others queue by priority
 port = 8443
 public_url = ""              # URL devices use to reach you; used in pairing links/QR
 max_body_bytes = 20971520    # 20 MB (vision models need room for images)
@@ -31,9 +32,8 @@ ttl_seconds = 300
 max_attempts = 5
 requests_per_minute_per_ip = 10
 
-# Defaults for every newly paired device (0 = unlimited).
-# Enforced today: max_concurrent, allow_model_management.
-# The rest are enforced from Phase 4 on.
+# Defaults for every newly paired device (0 = unlimited for token quotas);
+# each device's limits can then be changed in the TUI (L) or the CLI.
 [limits]
 tokens_per_day = 0
 tokens_per_month = 0
@@ -44,6 +44,12 @@ max_num_predict = 4096
 allowed_models = []          # empty = all installed models
 allow_model_management = false
 priority = "normal"          # low | normal | high
+
+[bans]                       # fail2ban-style: too many failed logins/pairing attempts
+failures = 10                # ... within window_seconds ...
+window_seconds = 600
+ban_seconds = 3600           # ... ban the client for this long, doubling on repeat offences
+max_ban_seconds = 604800
 
 [logging]
 audit_size = 5000

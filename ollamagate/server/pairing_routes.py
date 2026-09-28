@@ -16,12 +16,14 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, Response
 
 from ..config import Config
-from ..state import State
+from ..state import DeviceLimits, State
 from . import pairing
+from .app_routes import session_cookie_header
 from .body import BodyTooLarge, read_body_limited
 from ..ratelimit import RateLimiter, client_key
 
 MAX_CLAIM_BODY = 4096
+SESSION_MAX_AGE = 400 * 86400  # browsers cap cookies at 400 days; the token itself decides
 
 PAGE_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -53,6 +55,7 @@ def register_pairing_routes(
     state: State,
     fingerprint: str | None,
     client_ip: Callable[[Request], str | None],
+    record_failure: Callable[[str | None, str, str], None] = lambda ip, reason, attempt: None,
 ) -> None:
     assets = {path: (_load_asset(name), ctype) for path, (name, ctype) in _ASSETS.items()}
     # Claims are what an attacker would brute-force; page loads get more slack.
@@ -127,15 +130,17 @@ def register_pairing_routes(
             ip=ip,
             user_agent=request.headers.get("user-agent", ""),
             allow_model_management=config.limits.allow_model_management,
+            limits=DeviceLimits.from_config(config.limits),
         )
         if result.error is pairing.ClaimError.CLOSED:
             return not_found()
         if result.error is pairing.ClaimError.BAD_NAME:
             return _json(400, {"error": "device name must be 1-64 printable characters"})
         if result.error is pairing.ClaimError.INVALID:
+            record_failure(ip, "failed pairing attempts", f"{kind}:{value}")
             return _json(403, {"error": "invalid pairing code", "attempts_left": result.attempts_left})
         assert result.device is not None and result.token is not None
-        return _json(
+        response = _json(
             200,
             {
                 "token": result.token,
@@ -143,5 +148,9 @@ def register_pairing_routes(
                 "name": result.device.name,
                 "base_url": config.base_url,
                 "fingerprint": fingerprint,
+                "app_url": "/app",
             },
         )
+        # Also sign this browser in to the built-in chat (HttpOnly: page scripts can't read it).
+        response.headers["Set-Cookie"] = session_cookie_header(result.token, SESSION_MAX_AGE)
+        return response

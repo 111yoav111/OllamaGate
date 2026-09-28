@@ -46,6 +46,38 @@ def extract_bearer(headers: Mapping[str, str]) -> str | None:
     return token or None
 
 
+# Browser sessions (the /app chat) carry the device token in this cookie. The
+# __Host- prefix makes browsers insist on Secure, Path=/ and no Domain, so a
+# sibling subdomain or port can't plant or overwrite it. (Browsers treat
+# http://localhost as secure, so this also works in loopback-only HTTP mode.)
+SESSION_COOKIE = "__Host-og_session"
+CSRF_HEADER = "x-ollamagate-csrf"
+
+
+def csrf_token(key: bytes, token: str) -> str:
+    """Per-device CSRF token, bound to the session token and a per-process key."""
+    return hmac.new(key, b"csrf:" + hash_token(token).encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def extract_credential(headers: Mapping[str, str], cookies: Mapping[str, str], csrf_key: bytes) -> tuple[str | None, bool]:
+    """Return (token, via_cookie).
+
+    A bearer token always wins. A session cookie only counts when the request
+    also carries the matching CSRF header, which a cross-site page can't set
+    (and SameSite=Strict keeps the cookie off cross-site requests anyway).
+    """
+    bearer = extract_bearer(headers)
+    if bearer:
+        return bearer, False
+    cookie = cookies.get(SESSION_COOKIE)
+    if not cookie or len(cookie) > MAX_TOKEN_LEN:
+        return None, False
+    given = headers.get(CSRF_HEADER, "")
+    if not hmac.compare_digest(given.encode(), csrf_token(csrf_key, cookie).encode()):
+        return None, True
+    return cookie, True
+
+
 class AuthResult(enum.Enum):
     OK = "ok"
     MISSING = "missing"

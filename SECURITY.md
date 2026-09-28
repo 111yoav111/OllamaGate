@@ -12,7 +12,7 @@ someone who knows the address, scans for Ollama, or sniffs the network.
 **Assets:** the models and GPU time, the prompts/responses of paired devices,
 and the host machine itself.
 
-## What's protected (Phases 1-3)
+## What's protected (Phases 1-4)
 
 - **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
   owner has a pairing window open) requires a device token.
@@ -98,20 +98,47 @@ and the host machine itself.
   before authentication - `/healthz` included, so the host doesn't even look
   alive - cuts all streams and refuses pairing while keeping all devices.
 - **Runtime settings** are limited to a small allowlist (public URL, pairing
-  TTL/attempts, default concurrency, default model-management grant), are
+  TTL/attempts, and the concurrency / model-management defaults for devices
+  paired from then on - existing devices keep their own limits), are
   validated like the config file, audited, and never written to disk.
   `server.public_url` must be `https://host[:port]` (plain `http` only for
   loopback) with no path, query, fragment or credentials, since it is embedded
   in pairing links and QR codes.
+- **Per-device limits.** Token quotas (day/month), requests per minute and
+  concurrency are enforced before anything reaches Ollama (`429` +
+  `Retry-After`); `num_ctx` (when requested), `num_predict` / `max_tokens`
+  (always, and never more than the tokens left in a quota) and `keep_alive`
+  are clamped server-side; models outside a device's allowlist are refused and
+  hidden from listings (`/api/tags`, `/api/ps`, `/v1/models`; failing closed).
+  Because Ollama's Go JSON decoder matches keys case-insensitively, request
+  keys at the levels it decodes into structs must be plain lowercase - so
+  `"MODEL"` or `"ſtream"` can't smuggle a second value past the checks.
+  Token usage comes from Ollama's own counts, and interrupted streams are
+  charged an estimate so quotas can't be dodged by disconnecting early. A
+  global priority queue (with a wait limit) keeps one device from
+  monopolising Ollama.
+- **Auto-bans.** Repeated failed logins or pairing attempts ban the client
+  (fail2ban-style, doubling on repeat, IPv6 per /64). Only *distinct* wrong
+  bearer tokens / pairing codes count: anonymous requests don't (any website
+  can make its visitors send those, which would turn bans into a weapon), and
+  neither does a device retrying its old token after a restart. Banned clients
+  are refused before any routing, `/healthz` included - unless the request
+  carries a valid device credential, so paired devices behind the same NAT as
+  an attacker keep working. Loopback is never auto-banned.
+- **Browser chat (`/app`).** A browser that pairs gets an `HttpOnly`, `Secure`,
+  `SameSite=Strict`, `__Host-` session cookie holding its device token. Cookie-authenticated
+  requests must also carry a CSRF header (an HMAC of the token under a
+  per-process key), which cross-site pages can neither read nor forge; there is
+  no CORS. `/app` and its assets require a valid session (generic `401`
+  otherwise), have a strict CSP with no external resources, and render model
+  output as text only. Revoking the device ends the session.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
 ## Not yet protected (planned)
 
-- Brute-force auto-bans, per-device rate limits and token quotas (Phase 4).
-  Until then, repeated failed logins are only recorded in the audit log.
-- Browser cookie sessions and CSRF tokens arrive with the `/app` chat UI
-  (Phase 4); until then browsers only display the token for use in apps.
+- Tailscale / Cloudflare Tunnel / Let's Encrypt modes, mTLS client
+  certificates, notifications and service install (Phase 5).
 - Ollama error bodies and `/api/show` output are passed through unchanged and
   may reveal local file paths of model files to paired devices.
 
@@ -121,7 +148,12 @@ and the host machine itself.
   clients or use Tailscale / a real certificate (Phase 5).
 - On Windows, POSIX file modes don't apply; the key relies on the per-user
   profile directory ACLs.
-- All state is in memory by design: a restart revokes every device.
+- All state is in memory by design: a restart revokes every device, and also
+  resets usage counters and bans.
+- Token quotas are only as exact as Ollama's own counts; interrupted streams
+  are estimated (about one token per streamed chunk).
+- The browser chat keeps conversations only in the page (lost on reload);
+  nothing is stored server-side.
 - `ollamagate devices rotate` prints the new token on the owner's terminal; it
   must be delivered to the device out of band.
 - The admin channel writes two runtime files (`run/admin.json`, `run/admin.sock`)

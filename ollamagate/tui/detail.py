@@ -17,6 +17,18 @@ from ..admin.errors import AdminError
 from .widgets import ACTIVITY_DOT, InputScreen, ago, t, ts
 
 
+def _limits_summary(lim: dict[str, Any]) -> str:
+    def n(v: int) -> str:
+        return "∞" if v == 0 else str(v)
+
+    models = ", ".join(lim["allowed_models"]) or "all models"
+    return (
+        f"{n(lim['tokens_per_day'])} tok/day · {n(lim['tokens_per_month'])} tok/month · "
+        f"{n(lim['requests_per_minute'])} req/min · {lim['max_concurrent']} concurrent · "
+        f"ctx ≤ {n(lim['max_num_ctx'])} · output ≤ {n(lim['max_num_predict'])} · {lim['priority']} priority · {models}"
+    )
+
+
 class DeviceDetailScreen(Screen[None]):
     """Everything known about one device, with the same action keys as the table."""
 
@@ -29,6 +41,7 @@ class DeviceDetailScreen(Screen[None]):
         Binding("n", "act('rename')", "Rename"),
         Binding("l", "act('limits')", "Limits"),
         Binding("o", "notes", "Notes"),
+        Binding("b", "act('ban')", "Ban IP"),
     ]
 
     def __init__(self, device_id: str) -> None:
@@ -74,7 +87,8 @@ class DeviceDetailScreen(Screen[None]):
             ("User agent", t(d["user_agent"])),
             ("Active now", t(", ".join(d["current_models"]) or f"{d['active_streams']} stream(s)")),
             ("Requests", t(f"{d['requests_today']} today · {d['requests_month']} this month · {d['requests_total']} total")),
-            ("Tokens", t(f"{d['tokens_today']} today" if d["tokens_today"] else "- (counted from Phase 4)")),
+            ("Tokens", t(f"{d['tokens_today']} today · {d['tokens_month']} this month · {d['tokens_total']} total")),
+            ("Limits", t(_limits_summary(d["limits"]))),
             ("Token", t(d["token_prefix"])),
             ("Token expires", t(expires)),
             ("Token rotated", t(ts(d["token_rotated_at"]))),
@@ -113,11 +127,18 @@ class DeviceDetailScreen(Screen[None]):
         )
 
 
-class LimitsScreen(ModalScreen[None]):
-    """Per-device limits editable today: token expiry and model management.
+NUMERIC_LIMITS = [
+    ("tokens_per_day", "Tokens per day (0 = unlimited)"),
+    ("tokens_per_month", "Tokens per month (0 = unlimited)"),
+    ("requests_per_minute", "Requests per minute (0 = unlimited)"),
+    ("max_concurrent", "Concurrent requests"),
+    ("max_num_ctx", "Max context size, num_ctx (0 = no clamp)"),
+    ("max_num_predict", "Max output tokens, num_predict (0 = no clamp)"),
+]
 
-    Token/rate quotas, model allowlists etc. are added here in Phase 4.
-    """
+
+class LimitsScreen(ModalScreen[None]):
+    """Edit one device's limits, model access and token expiry (live, until restart)."""
 
     BINDINGS = [Binding("escape", "close", "Close")]
     EXPIRY_CHOICES = [("Never", "never"), ("1 day", "1d"), ("7 days", "7d"), ("30 days", "30d"), ("Custom (seconds)", "custom")]
@@ -129,8 +150,23 @@ class LimitsScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         app: Any = self.app
         d = app.admin.show_device(self.device_id)
-        with Vertical(classes="dialog wide"):
+        lim = d["limits"]
+        with VerticalScroll(classes="dialog wide"):
             yield Label(Text.assemble("Limits for ", t(d["name"]), style="bold"))
+            yield Static(
+                t(f"Usage: {d['tokens_today']} tokens today, {d['tokens_month']} this month, "
+                  f"{d['requests_today']} requests today"),
+            )
+            for key, label in NUMERIC_LIMITS:
+                with Horizontal(classes="setting"):
+                    yield Label(label, classes="setting-key")
+                    yield Input(value=str(lim[key]), id="lim-" + key, classes="setting-value")
+            with Horizontal(classes="setting"):
+                yield Label("Allowed models (comma-separated, empty = all)", classes="setting-key")
+                yield Input(value=", ".join(lim["allowed_models"]), id="lim-allowed_models", classes="setting-value")
+            with Horizontal(classes="setting"):
+                yield Label("Priority", classes="setting-key")
+                yield Select([(p, p) for p in ("low", "normal", "high")], value=lim["priority"], allow_blank=False, id="lim-priority")
             with Horizontal(classes="setting"):
                 yield Label("Model management (pull/push/delete…)", classes="setting-key")
                 yield Switch(value=d["allow_model_management"], id="mm")
@@ -138,13 +174,13 @@ class LimitsScreen(ModalScreen[None]):
                 yield Label("Token expiry (from now)", classes="setting-key")
                 yield Select(self.EXPIRY_CHOICES, prompt="unchanged", id="expiry")
                 yield Input(placeholder="seconds", id="expiry-custom", disabled=True)
-            yield Static(Text("Quotas, rate limits and model allowlists arrive in Phase 4.", style="dim"))
             with Horizontal(classes="buttons"):
                 yield Button("Apply", id="apply", variant="primary")
                 yield Button("Close", id="close")
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        self.query_one("#expiry-custom", Input).disabled = event.value != "custom"
+        if event.select.id == "expiry":
+            self.query_one("#expiry-custom", Input).disabled = event.value != "custom"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "close":
@@ -152,19 +188,35 @@ class LimitsScreen(ModalScreen[None]):
             return
         app: Any = self.app
         # Validate everything first, then apply only what changed (no half-applied edits).
+        current = app.admin.show_device(self.device_id)
+        changes: dict[str, Any] = {}
+        for key, label in NUMERIC_LIMITS:
+            raw = self.query_one("#lim-" + key, Input).value.strip()
+            if not (raw.isascii() and raw.isdigit() and len(raw) <= 12):
+                app.say(f"{label}: enter a whole number", severity="error")
+                return
+            if int(raw) != current["limits"][key]:
+                changes[key] = int(raw)
+        models = [m.strip() for m in self.query_one("#lim-allowed_models", Input).value.split(",") if m.strip()]
+        if models != current["limits"]["allowed_models"]:
+            changes["allowed_models"] = models
+        priority = self.query_one("#lim-priority", Select).value
+        if priority != current["limits"]["priority"]:
+            changes["priority"] = priority
         select = self.query_one("#expiry", Select)
-        choice = select.value
         expiry: Any = None
         if not select.is_blank():
-            expiry = choice
-            if choice == "custom":
+            expiry = select.value
+            if expiry == "custom":
                 raw = self.query_one("#expiry-custom", Input).value.strip()
                 if not (raw.isascii() and raw.isdigit() and len(raw) <= 12):
                     app.say("Custom expiry must be a number of seconds", severity="error")
                     return
                 expiry = int(raw)
-        current = app.admin.show_device(self.device_id)
         allowed = self.query_one("#mm", Switch).value
+
+        if changes and app._run_admin(app.admin.set_limits, self.device_id, **changes) is None:
+            return
         if expiry is not None and app._run_admin(app.admin.set_expiry, self.device_id, expiry) is None:
             return
         if allowed != current["allow_model_management"]:
