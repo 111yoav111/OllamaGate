@@ -148,6 +148,29 @@ Pick one `network.mode` in `config.toml` (most recommended first):
 mode = "tailscale"
 ```
 
+### Client certificates (mTLS)
+
+For defence in depth, turn on client certificates:
+
+```toml
+[tls]
+client_certs = true
+```
+
+Each device then gets a client certificate at pairing (shown once, next to the
+token: a password-protected `.p12` for phones and browsers, and
+`client.pem`/`client.key` for apps and scripts). Every request needs **both** the
+token and that device's certificate, so a leaked token alone is useless:
+
+```sh
+curl --cert client.pem --key client.key -H "Authorization: Bearer og_dev_..." https://<server>:8443/api/tags
+```
+
+The signing CA lives only in memory and is new on every start, like the device
+list, so a restart invalidates all certificates too. Pairing itself needs no
+certificate. Not available with `network.mode = "cloudflare"` or `tls.mode = "off"`
+(OllamaGate must terminate TLS itself).
+
 `ollamagate doctor` checks the whole setup: Ollama running and not exposed,
 certificate validity and name, network mode prerequisites, file permissions.
 
@@ -213,5 +236,5 @@ Everything else returns `404`. Model management (`pull`, `push`, `delete`,
 5. ~~Tailscale / Cloudflare / Let's Encrypt modes, doctor, notifications, service install, packaging~~
 
 Possible next steps (need new dependencies, so not done without your OK):
-offline GeoIP lookup (MaxMind GeoLite2), mTLS client certificates, TOTP for
-sensitive admin commands.
+offline GeoIP lookup (MaxMind GeoLite2), TOTP for sensitive admin commands.
+(mTLS client certificates are done: `[tls] client_certs = true`.)

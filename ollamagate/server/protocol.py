@@ -16,6 +16,11 @@ from typing import Sequence
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from .netutil import IPNetwork, is_trusted
+from .tls import peer_cert_fingerprint
+
+# Scope key carrying the SHA-256 of the verified client certificate (mTLS).
+# Set here from the TLS connection itself, so no request header can forge it.
+CLIENT_CERT_SCOPE = "ollamagate.client_cert"
 
 
 def make_guarded_protocol(
@@ -38,6 +43,15 @@ def make_guarded_protocol(
                 per_ip[ip] += 1
                 self._counted_ip = ip
             self._arm_header_timer()
+            cert_fp = peer_cert_fingerprint(transport.get_extra_info("ssl_object"))
+            if cert_fp is not None:
+                app = self.app
+
+                async def with_client_cert(scope, receive, send):  # type: ignore[no-untyped-def]
+                    scope[CLIENT_CERT_SCOPE] = cert_fp
+                    await app(scope, receive, send)
+
+                self.app = with_client_cert
 
         def connection_lost(self, exc: Exception | None) -> None:
             if self._header_timer is not None:

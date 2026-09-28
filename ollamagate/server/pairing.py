@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 from ..state import Device, DeviceLimits, PairingWindow, State, WindowState
 from . import auth
+from .tls import ClientCA, ClientCert
 
 # Crockford base32: no I, L, O, U, so 0/O and 1/I/L can't be confused.
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -163,6 +164,7 @@ class ClaimResult:
     device: Device | None = None
     token: str | None = None
     attempts_left: int = 0
+    client_cert: ClientCert | None = None
 
 
 def claim(
@@ -176,6 +178,7 @@ def claim(
     now: float | None = None,
     allow_model_management: bool = False,
     limits: "DeviceLimits | None" = None,
+    client_ca: ClientCA | None = None,
 ) -> ClaimResult:
     """Try to pair a device. ``kind`` is "code" (typed code) or "link" (URL secret).
 
@@ -229,10 +232,13 @@ def claim(
         allow_model_management=allow_model_management,
         limits=limits,
     )
+    cert = client_ca.issue(device.id) if client_ca is not None else None
+    if cert is not None:
+        device.client_cert_fp = cert.fingerprint
     state.touch_device(device, ip, None, ua)
     window.device_id = device.id
     close_window(state, WindowState.USED)
     state.audit(
         "pairing_succeeded", ip=ip, device_id=device.id, window_id=window.id, method=matched, user_agent=ua
     )
-    return ClaimResult(device=device, token=token)
+    return ClaimResult(device=device, token=token, client_cert=cert)

@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse, Response
 
 from ..state import State
 from . import auth
+from .protocol import CLIENT_CERT_SCOPE
 
 APP_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -48,7 +49,7 @@ def register_app_routes(
 
     def session_device(request: Request):  # type: ignore[no-untyped-def]
         cookie = request.cookies.get(auth.SESSION_COOKIE)
-        outcome = auth.authenticate(state, cookie)
+        outcome = auth.authenticate(state, cookie, client_cert=request.scope.get(CLIENT_CERT_SCOPE))
         return outcome.device if outcome.result is auth.AuthResult.OK else None
 
     async def page(request: Request) -> Response:

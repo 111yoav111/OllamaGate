@@ -7,6 +7,7 @@ While no pairing window is open every ``/pair*`` route returns the same
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from importlib import resources
 from typing import Callable
@@ -18,6 +19,7 @@ from starlette.responses import JSONResponse, Response
 from ..config import Config
 from ..state import DeviceLimits, State
 from . import pairing
+from .tls import ClientCA
 from .app_routes import session_cookie_header
 from .body import BodyTooLarge, read_body_limited
 from ..ratelimit import RateLimiter, client_key
@@ -56,6 +58,7 @@ def register_pairing_routes(
     fingerprint: str | None,
     client_ip: Callable[[Request], str | None],
     record_failure: Callable[[str | None, str, str], None] = lambda ip, reason, attempt: None,
+    client_ca: ClientCA | None = None,
 ) -> None:
     assets = {path: (_load_asset(name), ctype) for path, (name, ctype) in _ASSETS.items()}
     # Claims are what an attacker would brute-force; page loads get more slack.
@@ -131,6 +134,7 @@ def register_pairing_routes(
             user_agent=request.headers.get("user-agent", ""),
             allow_model_management=config.limits.allow_model_management,
             limits=DeviceLimits.from_config(config.limits),
+            client_ca=client_ca,
         )
         if result.error is pairing.ClaimError.CLOSED:
             return not_found()
@@ -140,17 +144,24 @@ def register_pairing_routes(
             record_failure(ip, "failed pairing attempts", f"{kind}:{value}")
             return _json(403, {"error": "invalid pairing code", "attempts_left": result.attempts_left})
         assert result.device is not None and result.token is not None
-        response = _json(
-            200,
-            {
-                "token": result.token,
-                "device_id": result.device.id,
-                "name": result.device.name,
-                "base_url": config.base_url,
-                "fingerprint": fingerprint,
-                "app_url": "/app",
-            },
-        )
+        payload = {
+            "token": result.token,
+            "device_id": result.device.id,
+            "name": result.device.name,
+            "base_url": config.base_url,
+            "fingerprint": fingerprint,
+            "app_url": "/app",
+        }
+        cert = result.client_cert
+        if cert is not None:
+            # mTLS: shown once, like the token. The server keeps only its fingerprint.
+            payload["client_cert"] = {
+                "cert_pem": cert.cert_pem,
+                "key_pem": cert.key_pem,
+                "p12": base64.b64encode(cert.p12).decode(),
+                "p12_password": cert.p12_password,
+            }
+        response = _json(200, payload)
         # Also sign this browser in to the built-in chat (HttpOnly: page scripts can't read it).
         response.headers["Set-Cookie"] = session_cookie_header(result.token, SESSION_MAX_AGE)
         return response

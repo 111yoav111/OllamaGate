@@ -88,6 +88,8 @@ class Device:
     # During a rotation grace period the previous token keeps working until this time.
     previous_token_hash: str | None = None
     previous_token_valid_until: float | None = None
+    # SHA-256 of the client certificate issued at pairing (mTLS); None = token only.
+    client_cert_fp: str | None = None
     last_seen: float | None = None
     last_ip: str | None = None
     last_port: int | None = None

@@ -151,12 +151,23 @@ and the host machine itself.
   LaunchAgent, or the user's Startup folder on Windows) and refuses to run as
   root/Administrator; `serve` refuses too unless given `--allow-root`. Paths in
   the systemd unit are escaped (`%`, `$`), and control characters are refused.
+- **mTLS (opt-in, `tls.client_certs`).** At pairing each device also gets a
+  client certificate (ECDSA P-256, `clientAuth` only) signed by a CA whose key
+  exists only in process memory and is regenerated on every start. The server
+  keeps only the certificate's SHA-256; the key is sent once over the pairing
+  response. The TLS layer accepts only certificates from that CA (none is fine,
+  so `/pair` stays reachable); every authentication check (API, `/me`, `/app`
+  cookie, ban bypass, the mid-request re-check) then requires the certificate
+  that belongs to the token's device. A token without it gets the generic 401
+  and counts as a failed login. Revoking the device revokes the certificate.
+  The `.p12` uses legacy 3DES/SHA-1 wrapping because iOS and older Android
+  can't import the modern format; its password is random (96 bits).
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
 ## Not yet protected (planned)
 
-- mTLS client certificates, TOTP for admin actions and offline GeoIP (need
+- TOTP for admin actions and offline GeoIP (need
   new dependencies; not added without the owner's approval).
 - Ollama error bodies and `/api/show` output are passed through unchanged and
   may reveal local file paths of model files to paired devices.

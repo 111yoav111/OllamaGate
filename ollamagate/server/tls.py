@@ -6,14 +6,17 @@ import datetime as dt
 import hashlib
 import ipaddress
 import os
+import secrets
 import socket
 import ssl
+from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 CERT_NAME = "cert.pem"
 KEY_NAME = "key.pem"
@@ -131,14 +134,108 @@ def format_fingerprint(fp_hex: str) -> str:
     return ":".join(fp_hex[i : i + 2] for i in range(0, len(fp_hex), 2)).upper()
 
 
-def build_server_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
+def build_server_context(cert_path: Path, key_path: Path, client_ca_pem: str | None = None) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.options |= ssl.OP_NO_COMPRESSION | ssl.OP_CIPHER_SERVER_PREFERENCE
     # TLS 1.2 is limited to forward-secret AEAD suites; TLS 1.3 suites are always strong.
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
     ctx.load_cert_chain(str(cert_path), str(key_path))
+    if client_ca_pem:
+        # Optional at the TLS layer: unpaired devices must still reach /pair. A cert
+        # that is presented must chain to our CA; which device it belongs to (and
+        # whether that device needs one) is checked per request in auth.authenticate.
+        ctx.verify_mode = ssl.CERT_OPTIONAL
+        ctx.load_verify_locations(cadata=client_ca_pem)
     return ctx
+
+
+def peer_cert_fingerprint(ssl_object: ssl.SSLObject | None) -> str | None:
+    """SHA-256 of the verified client certificate on a TLS connection, if any."""
+    der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
+    return hashlib.sha256(der).hexdigest() if der else None
+
+
+@dataclass
+class ClientCert:
+    cert_pem: str
+    key_pem: str
+    p12: bytes  # cert + key for phones/browsers, encrypted with p12_password
+    p12_password: str
+    fingerprint: str  # sha256 hex of the DER certificate
+
+
+CLIENT_CERT_DAYS = 397
+
+
+class ClientCA:
+    """In-memory CA that signs one client certificate per paired device (mTLS).
+
+    Its key never touches disk and dies with the process. That matches the
+    in-memory device list: after a restart every device must pair again anyway,
+    and every certificate issued before the restart stops working.
+    """
+
+    def __init__(self) -> None:
+        self._key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "OllamaGate device CA")])
+        now = dt.datetime.now(dt.timezone.utc)
+        self.cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(self._key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(days=CLIENT_CERT_DAYS + 1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False, content_commitment=False, key_encipherment=False,
+                    data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True,
+                    encipher_only=False, decipher_only=False,
+                ),
+                critical=True,
+            )
+            .sign(self._key, hashes.SHA256())
+        )
+        self.pem = self.cert.public_bytes(serialization.Encoding.PEM).decode()
+
+    def issue(self, device_id: str) -> ClientCert:
+        key = ec.generate_private_key(ec.SECP256R1())
+        now = dt.datetime.now(dt.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, device_id)]))
+            .issuer_name(self.cert.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(days=CLIENT_CERT_DAYS))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+            .sign(self._key, hashes.SHA256())
+        )
+        password = secrets.token_urlsafe(12)
+        # Legacy PKCS#12 encryption on purpose: iOS/macOS and older Android refuse the
+        # AES/PBKDF2 variant. The password is random (96 bits), so this is only a wrapper.
+        encryption = (
+            serialization.PrivateFormat.PKCS12.encryption_builder()
+            .kdf_rounds(50000)
+            .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
+            .hmac_hash(hashes.SHA1())
+            .build(password.encode())
+        )
+        der = cert.public_bytes(serialization.Encoding.DER)
+        return ClientCert(
+            cert_pem=cert.public_bytes(serialization.Encoding.PEM).decode(),
+            key_pem=key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+            ).decode(),
+            p12=pkcs12.serialize_key_and_certificates(b"OllamaGate", key, cert, None, encryption),
+            p12_password=password,
+            fingerprint=hashlib.sha256(der).hexdigest(),
+        )
 
 
 class CertReloader:

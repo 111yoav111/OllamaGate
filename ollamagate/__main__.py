@@ -108,8 +108,13 @@ def serve(
 
     warnings = [f"{f.title}. {f.fix}" for f in doctor.check_ollama_binding(config) if f.level != "ok"]
 
-    app = create_app(config, state, fingerprint=fingerprint)
-    server = build_server(config, app, state, tls_info, own_logging=no_tui)
+    client_ca = None
+    if config.tls.client_certs:
+        from .server.tls import ClientCA
+
+        client_ca = ClientCA()
+    app = create_app(config, state, fingerprint=fingerprint, client_ca=client_ca)
+    server = build_server(config, app, state, tls_info, own_logging=no_tui, client_ca=client_ca)
     admin = Admin(state, config, fingerprint)
     # Bind now, so "address in use" is reported before any TUI takes over the terminal.
     sock = server.config.bind_socket()
@@ -319,6 +324,7 @@ def _print_device(d: dict[str, Any]) -> None:
         ("Token", d["token_prefix"]),
         ("Token expires", _ts(d["token_expires_at"]) if d["token_expires_at"] else "never"),
         ("Token rotated", _ts(d["token_rotated_at"])),
+        ("Client cert", f"required (SHA-256 {d['client_cert']}…)" if d.get("client_cert") else "none"),
         ("Model management", "allowed" if d["allow_model_management"] else "blocked"),
         ("Active streams", str(d["active_streams"])),
         ("Notes", safe(d["notes"] or "-")),

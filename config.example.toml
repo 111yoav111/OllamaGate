@@ -26,6 +26,7 @@ mode = "self-signed"         # self-signed | files | off (off = loopback only)
 cert_file = ""
 key_file = ""
 extra_sans = []              # extra hostnames/IPs for the self-signed cert
+client_certs = false         # mTLS: issue each device a client cert at pairing and require it with the token
 
 [pairing]
 ttl_seconds = 300
