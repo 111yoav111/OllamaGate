@@ -55,9 +55,13 @@ class RateLimiter:
         hits.append(now)
         return True
 
-    def retry_after(self, key: str, now: float | None = None) -> int:
+    def retry_after(self, key: str, now: float | None = None, limit: int | None = None) -> int:
+        """Seconds until ``key`` may hit again (under ``limit`` if it differs from the default)."""
         now = time.monotonic() if now is None else now
+        limit = self.limit if limit is None else limit
         hits = self._hits.get(key)
-        if not hits:
+        if not hits or len(hits) < limit:
             return 0
-        return max(1, int(hits[0] + self.window - now) + 1)
+        # The hit that has to expire before a new one fits (limits can shrink at runtime).
+        oldest_blocking = hits[len(hits) - limit]
+        return max(1, int(oldest_blocking + self.window - now) + 1)

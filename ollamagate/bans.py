@@ -2,7 +2,8 @@
 
 Too many failed logins / pairing attempts from one client within a window
 bans it for a while; each further ban (a "strike") doubles the duration, up
-to a maximum. Strikes are forgotten after a quiet day. The owner can also ban
+to a maximum. Strikes are forgotten a quiet day after the last ban ends. Only
+distinct wrong credentials count (see ``record_failure``). The owner can also ban
 and unban manually. IPv6 clients are handled per /64 (see ``client_key``).
 Loopback clients are never banned automatically, so the owner can't lock
 themselves out while testing.
@@ -54,8 +55,8 @@ class BanList:
         self.ban_seconds = ban_seconds
         self.max_ban_seconds = max_ban_seconds
         self.bans: dict[str, Ban] = {}
-        self._failures: OrderedDict[str, deque[float]] = OrderedDict()
-        self._strikes: dict[str, tuple[int, float]] = {}  # key -> (count, last ban time)
+        self._failures: OrderedDict[str, deque[tuple[float, str]]] = OrderedDict()  # (time, fingerprint)
+        self._strikes: dict[str, tuple[int, float]] = {}  # key -> (count, when the last ban ended)
 
     def configure(self, threshold: int, window_seconds: float, ban_seconds: float, max_ban_seconds: float) -> None:
         self.threshold = threshold
@@ -75,8 +76,16 @@ class BanList:
             return None
         return ban
 
-    def record_failure(self, ip: str | None, reason: str, now: float | None = None) -> Ban | None:
-        """Count a failure; returns the new Ban if this one tipped the client over."""
+    def record_failure(
+        self, ip: str | None, reason: str, fingerprint: str = "", now: float | None = None
+    ) -> Ban | None:
+        """Count a failure; returns the new Ban if this one tipped the client over.
+
+        ``fingerprint`` identifies what was tried (e.g. a hash of the wrong
+        token). Only *distinct* attempts count: a guesser tries many, while a
+        device still using its token from before a restart repeats the same one
+        and must not get its owner's IP banned.
+        """
         if ip is None or _is_loopback(ip):
             return None
         now = time.time() if now is None else now
@@ -88,18 +97,20 @@ class BanList:
             hits = self._failures[key] = deque()
         else:
             self._failures.move_to_end(key)
-        while hits and hits[0] <= now - self.window:
+        while hits and hits[0][0] <= now - self.window:
             hits.popleft()
-        hits.append(now)
+        if fingerprint and any(fp == fingerprint for _, fp in hits):
+            return None  # the same wrong credential again
+        hits.append((now, fingerprint))
         if len(hits) < self.threshold:
             return None
         del self._failures[key]
-        count, last = self._strikes.get(key, (0, 0.0))
-        if now - last > STRIKE_MEMORY_SECONDS:
-            count = 0
+        count, last_until = self._strikes.get(key, (0, 0.0))
+        if now - last_until > STRIKE_MEMORY_SECONDS:
+            count = 0  # quiet for a day after the last ban ended: start over
         count += 1
-        self._strikes[key] = (count, now)
         duration = min(self.ban_seconds * 2 ** (count - 1), self.max_ban_seconds)
+        self._strikes[key] = (count, now + duration)
         ban = Ban(key=key, reason=reason, created_at=now, until=now + duration, manual=False, strikes=count)
         self.bans[key] = ban
         return ban
