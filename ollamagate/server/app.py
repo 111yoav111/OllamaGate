@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -27,11 +29,13 @@ from .proxy import (
     build_upstream_headers,
     monotonic_ms,
     open_upstream,
+    race_kill,
 )
 
 log = logging.getLogger("ollamagate.app")
 
 PROXY_METHODS = ["GET", "POST", "DELETE", "HEAD"]
+SWEEP_INTERVAL = 1.0
 
 
 class BodyTooLarge(Exception):
@@ -49,11 +53,8 @@ def unauthorized() -> JSONResponse:
 
 async def read_body_limited(request: Request, limit: int) -> bytes:
     declared = request.headers.get("content-length")
-    if declared is not None:
-        if not declared.isdigit():
-            raise BodyTooLarge()  # malformed; treat as refused
-        if int(declared) > limit:
-            raise BodyTooLarge()
+    if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        raise BodyTooLarge()
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -102,6 +103,14 @@ def create_app(
 ) -> FastAPI:
     trusted = parse_networks(config.network.trusted_proxies)
 
+    async def housekeeping() -> None:
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL)
+            try:
+                state.sweep()
+            except Exception:  # noqa: BLE001 - keep sweeping no matter what
+                log.exception("state sweep failed")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout = httpx.Timeout(
@@ -114,18 +123,25 @@ def create_app(
             base_url=config.ollama.url,
             timeout=timeout,
             transport=upstream_transport,
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=16),
             trust_env=False,  # never route to Ollama through an env-configured proxy
             follow_redirects=False,
         )
         app.state.http = client
         app.state.loop = asyncio.get_running_loop()
+        sweeper = asyncio.create_task(housekeeping())
         try:
             yield
         finally:
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
             state.kill_all_streams("server shutting down")
             await client.aclose()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    # No "/api" -> "/api/" redirects: they reveal routes and echo the Host header.
+    app.router.redirect_slashes = False
     app.state.config = config
     app.state.gate = state
 
@@ -151,7 +167,12 @@ def create_app(
     async def proxy(request: Request) -> Response:
         ip = client_ip(request)
         method, path = request.method, request.url.path
-        outcome = auth.authenticate(state, auth.extract_bearer(request.headers))
+        token = auth.extract_bearer(request.headers)
+
+        # 1. (Phase 4) IP bans and lockdown are checked here, before auth.
+
+        # 2. Authenticate.
+        outcome = auth.authenticate(state, token)
         if outcome.result is not auth.AuthResult.OK:
             state.audit(
                 "auth_failed",
@@ -159,7 +180,7 @@ def create_app(
                 device_id=outcome.device.id if outcome.device else None,
                 reason=outcome.result.value,
                 path=path,
-                user_agent=request.headers.get("user-agent", "")[:200],
+                user_agent=request.headers.get("user-agent", ""),
             )
             if outcome.result is auth.AuthResult.SUSPENDED:
                 return error(403, "device suspended")
@@ -167,6 +188,7 @@ def create_app(
         device = outcome.device
         assert device is not None
 
+        # 3. Is this an endpoint we forward at all, and may this device use it?
         kind = classify_endpoint(method, path)
         if kind is None:
             return error(404, "not found")
@@ -174,23 +196,12 @@ def create_app(
             state.audit("endpoint_denied", ip=ip, device_id=device.id, path=path, method=method)
             return error(403, "endpoint not allowed for this device")
 
-        try:
-            body = await read_body_limited(request, config.server.max_body_bytes)
-        except BodyTooLarge:
-            return error(413, "request body too large")
-
-        state.touch_device(
-            device,
-            ip,
-            request.client.port if request.client else None,
-            request.headers.get("user-agent", ""),
-        )
+        # 4. Concurrency cap, checked and claimed atomically (no await in between).
+        if len(state.device_streams(device.id)) >= config.limits.max_concurrent:
+            state.audit("limit_concurrency", ip=ip, device_id=device.id)
+            return error(429, "too many concurrent requests", {"Retry-After": "1"})
         started = time.monotonic()
         stream = state.register_stream(device.id, method, path)
-        http: httpx.AsyncClient = request.app.state.http
-        upstream_request = http.build_request(
-            method, path, content=body or None, headers=build_upstream_headers(request.headers)
-        )
 
         def finish(outcome_name: str, status: int, bytes_out: int) -> None:
             state.unregister_stream(stream)
@@ -208,22 +219,66 @@ def create_app(
                 )
             )
 
+        handed_off = False
         try:
-            upstream = await open_upstream(http, upstream_request, stream, request.receive)
+            # 5. Read the body. The stream is already registered, so a revoke during
+            #    a slow upload aborts it too; the whole body must arrive in time.
+            try:
+                body = await asyncio.wait_for(
+                    race_kill(read_body_limited(request, config.server.max_body_bytes), stream),
+                    config.server.body_timeout,
+                )
+            except BodyTooLarge:
+                finish("rejected", 413, 0)
+                return error(413, "request body too large")
+            except asyncio.TimeoutError:
+                finish("rejected", 408, 0)
+                return error(408, "request body timeout")
+            except ClientDisconnect:
+                finish("client_disconnect", 499, 0)
+                return Response(status_code=499)
+
+            # 6. Re-check the credential: it may have been revoked, rotated,
+            #    suspended or expired while the body was arriving.
+            recheck = auth.authenticate(state, token)
+            if recheck.result is not auth.AuthResult.OK or recheck.device is not device:
+                finish("rejected", 401, 0)
+                return unauthorized()
+
+            # (Phase 4) body policy: model allowlist, num_ctx/num_predict clamps, usage injection.
+
+            is_new_ip = state.touch_device(
+                device,
+                ip,
+                request.client.port if request.client else None,
+                request.headers.get("user-agent", ""),
+            )
+            if is_new_ip:
+                state.audit("device_new_ip", ip=ip, device_id=device.id)
+
+            # 7. Forward.
+            http: httpx.AsyncClient = request.app.state.http
+            upstream_request = http.build_request(
+                method, path, content=body or None, headers=build_upstream_headers(request.headers)
+            )
+            try:
+                upstream = await open_upstream(http, upstream_request, stream, request.receive)
+            except httpx.HTTPError as exc:
+                log.warning("upstream unavailable: %s", type(exc).__name__)
+                finish("upstream_error", 502, 0)
+                return error(502, "upstream unavailable")
+            handed_off = True
+            return ProxyStreamResponse(upstream, stream, finish)
         except StreamKilled as exc:
             finish("killed", 503, 0)
             return error(503, f"request terminated: {exc.reason}")
         except ClientGone:
             finish("client_disconnect", 499, 0)
             return Response(status_code=499)
-        except httpx.HTTPError as exc:
-            log.warning("upstream unavailable: %s", type(exc).__name__)
-            finish("upstream_error", 502, 0)
-            return error(502, "upstream unavailable")
-        except BaseException:
-            finish("upstream_error", 500, 0)
-            raise
-        return ProxyStreamResponse(upstream, stream, finish)
+        finally:
+            # Any other exit (e.g. cancellation) must not leave the stream registered.
+            if not handed_off and stream.id in state.streams:
+                finish("error", 500, 0)
 
     app.add_api_route("/api/{rest:path}", proxy, methods=PROXY_METHODS, include_in_schema=False)
     app.add_api_route("/v1/{rest:path}", proxy, methods=PROXY_METHODS, include_in_schema=False)

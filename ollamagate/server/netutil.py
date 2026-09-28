@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from typing import Mapping, Sequence
+from typing import Any, Sequence
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -19,14 +19,14 @@ def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
         return None
 
 
-def _trusted(ip: str, trusted: Sequence[IPNetwork]) -> bool:
+def is_trusted(ip: str, trusted: Sequence[IPNetwork]) -> bool:
     addr = _parse_ip(ip)
     return addr is not None and any(addr in net for net in trusted)
 
 
 def resolve_client_ip(
     peer_ip: str | None,
-    headers: Mapping[str, str],
+    headers: Any,
     trusted: Sequence[IPNetwork],
     network_mode: str,
 ) -> str | None:
@@ -37,12 +37,17 @@ def resolve_client_ip(
     not itself a trusted proxy, so a client cannot spoof its address by
     prepending entries.
     """
-    if peer_ip is None or not trusted or not _trusted(peer_ip, trusted):
+    if peer_ip is None or not trusted or not is_trusted(peer_ip, trusted):
         return peer_ip
     if network_mode == "cloudflare":
         cf = _parse_ip(headers.get("cf-connecting-ip", ""))
         return str(cf) if cf else peer_ip
-    xff = headers.get("x-forwarded-for", "")
+    # A proxy may append a second X-Forwarded-For header instead of merging, so
+    # join every occurrence; otherwise a client-supplied first header would win.
+    if hasattr(headers, "getlist"):
+        xff = ",".join(headers.getlist("x-forwarded-for"))
+    else:
+        xff = headers.get("x-forwarded-for", "")
     for hop in reversed([h for h in xff.split(",") if h.strip()]):
         addr = _parse_ip(hop)
         if addr is None:

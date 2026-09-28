@@ -6,6 +6,7 @@ Everything has a safe default, so running without a config file works.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import sys
 import tomllib
@@ -39,6 +40,12 @@ class ServerConfig:
     # Empty = derived from host/port.
     public_url: str = ""
     max_body_bytes: int = 20 * 1024 * 1024
+    # Seconds a client gets to send request headers / the whole request body.
+    header_timeout: float = 15.0
+    body_timeout: float = 120.0
+    # Connection caps (slowloris / resource exhaustion protection).
+    max_connections: int = 512
+    max_connections_per_ip: int = 32
 
 
 @dataclass
@@ -112,8 +119,23 @@ class Config:
         s = self.server
         if not (1 <= s.port <= 65535):
             raise ConfigError(f"server.port out of range: {s.port}")
-        if s.max_body_bytes <= 0:
-            raise ConfigError("server.max_body_bytes must be positive")
+        for name in ("max_body_bytes", "max_connections", "max_connections_per_ip"):
+            if getattr(s, name) <= 0:
+                raise ConfigError(f"server.{name} must be positive")
+        for name, value in (
+            ("server.header_timeout", s.header_timeout),
+            ("server.body_timeout", s.body_timeout),
+            ("ollama.connect_timeout", self.ollama.connect_timeout),
+            ("ollama.read_timeout", self.ollama.read_timeout),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ConfigError(f"{name} must be a positive number")
+        lim = self.limits
+        for name in ("tokens_per_day", "tokens_per_month", "requests_per_minute", "max_num_ctx", "max_num_predict"):
+            if getattr(lim, name) < 0:
+                raise ConfigError(f"limits.{name} must not be negative")
+        if lim.max_concurrent < 1:
+            raise ConfigError("limits.max_concurrent must be at least 1")
         if self.tls.mode not in ("self-signed", "files", "off"):
             raise ConfigError(f"tls.mode must be self-signed, files or off (got {self.tls.mode!r})")
         if self.tls.mode == "files" and not (self.tls.cert_file and self.tls.key_file):

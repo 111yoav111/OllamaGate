@@ -34,7 +34,9 @@ _EXACT: dict[tuple[str, str], EndpointKind] = {
 }
 
 _BLOB_RE = re.compile(r"^/api/blobs/sha256[:\-][0-9a-f]{64}$")
-_MODEL_RE = re.compile(r"^/v1/models/[A-Za-z0-9._:\-/]{1,200}$")
+# Model names like "library/llama3:8b"; every segment must contain a non-dot
+# character so "." / ".." segments (which httpx normalises away) can't be used.
+_MODEL_RE = re.compile(r"^/v1/models/(?:[A-Za-z0-9_:\-.]*[A-Za-z0-9_:\-][A-Za-z0-9_:\-.]*/?){1,8}$")
 
 
 def classify_endpoint(method: str, path: str) -> EndpointKind | None:
@@ -44,6 +46,6 @@ def classify_endpoint(method: str, path: str) -> EndpointKind | None:
         return kind
     if method in ("HEAD", "POST") and _BLOB_RE.match(path):
         return EndpointKind.MANAGEMENT
-    if method == "GET" and _MODEL_RE.match(path) and ".." not in path:
+    if method == "GET" and len(path) <= 256 and _MODEL_RE.match(path) and ".." not in path and not path.endswith("/"):
         return EndpointKind.INFERENCE
     return None
