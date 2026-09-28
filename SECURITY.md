@@ -12,7 +12,7 @@ someone who knows the address, scans for Ollama, or sniffs the network.
 **Assets:** the models and GPU time, the prompts/responses of paired devices,
 and the host machine itself.
 
-## What's protected (Phases 1-4)
+## What's protected
 
 - **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
   owner has a pairing window open) requires a device token.
@@ -132,13 +132,25 @@ and the host machine itself.
   no CORS. `/app` and its assets require a valid session (generic `401`
   otherwise), have a strict CSP with no external resources, and render model
   output as text only. Revoking the device ends the session.
+- **Network modes.** In `tailscale` mode OllamaGate binds only to the Tailscale
+  address (never the LAN or `0.0.0.0`), so a device needs tailnet access *and*
+  a device token. In `cloudflare` mode it stays on loopback and trusts only the
+  local tunnel for client IPs. Renewed certificates (Tailscale, Let's Encrypt)
+  are loaded into the live TLS context; a half-written renewal is ignored.
+- **Notifications** are opt-in, carry metadata only (device name, IP, reason),
+  are rate-limited and asynchronous so they can't slow requests down, and never
+  log the Telegram bot URL (it contains the token). ntfy topics are readable by
+  anyone who knows the name: use a long random one or your own server.
+- **Service install** always installs a per-user service (systemd user unit,
+  LaunchAgent, or a Task Scheduler task with limited rights) and refuses to run
+  as root/Administrator; `serve` warns when started as root.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
 ## Not yet protected (planned)
 
-- Tailscale / Cloudflare Tunnel / Let's Encrypt modes, mTLS client
-  certificates, notifications and service install (Phase 5).
+- mTLS client certificates, TOTP for admin actions and offline GeoIP (need
+  new dependencies; not added without the owner's approval).
 - Ollama error bodies and `/api/show` output are passed through unchanged and
   may reveal local file paths of model files to paired devices.
 
