@@ -16,7 +16,7 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, Response
 
 from ..config import Config
-from ..state import State
+from ..state import DeviceLimits, State
 from . import pairing
 from .body import BodyTooLarge, read_body_limited
 from ..ratelimit import RateLimiter, client_key
@@ -53,6 +53,7 @@ def register_pairing_routes(
     state: State,
     fingerprint: str | None,
     client_ip: Callable[[Request], str | None],
+    record_failure: Callable[[str | None, str], None] = lambda ip, reason: None,
 ) -> None:
     assets = {path: (_load_asset(name), ctype) for path, (name, ctype) in _ASSETS.items()}
     # Claims are what an attacker would brute-force; page loads get more slack.
@@ -127,12 +128,14 @@ def register_pairing_routes(
             ip=ip,
             user_agent=request.headers.get("user-agent", ""),
             allow_model_management=config.limits.allow_model_management,
+            limits=DeviceLimits.from_config(config.limits),
         )
         if result.error is pairing.ClaimError.CLOSED:
             return not_found()
         if result.error is pairing.ClaimError.BAD_NAME:
             return _json(400, {"error": "device name must be 1-64 printable characters"})
         if result.error is pairing.ClaimError.INVALID:
+            record_failure(ip, "failed pairing attempts")
             return _json(403, {"error": "invalid pairing code", "attempts_left": result.attempts_left})
         assert result.device is not None and result.token is not None
         return _json(

@@ -35,9 +35,13 @@ class RateLimiter:
         while hits and hits[0] <= cutoff:
             hits.popleft()
 
-    def hit(self, key: str, now: float | None = None) -> bool:
-        """Record a hit for ``key``. Returns False if the key is over its limit."""
+    def hit(self, key: str, now: float | None = None, limit: int | None = None) -> bool:
+        """Record a hit for ``key``. Returns False if the key is over its limit.
+
+        ``limit`` overrides the default for this key (e.g. per-device limits).
+        """
         now = time.monotonic() if now is None else now
+        limit = self.limit if limit is None else limit
         hits = self._hits.get(key)
         if hits is None:
             if len(self._hits) >= self.max_keys:
@@ -46,7 +50,7 @@ class RateLimiter:
         else:
             self._hits.move_to_end(key)
         self._prune(hits, now)
-        if len(hits) >= self.limit:
+        if len(hits) >= limit:
             return False
         hits.append(now)
         return True

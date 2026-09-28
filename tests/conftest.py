@@ -15,7 +15,7 @@ from ollamagate.config import Config
 from ollamagate.server import auth
 from ollamagate.server.app import create_app
 from ollamagate.server.runner import build_server
-from ollamagate.state import Device, State
+from ollamagate.state import Device, DeviceLimits, State
 
 from .fake_ollama import Recorder, make_fake_ollama
 
@@ -128,7 +128,11 @@ def gate_factory(fake_ollama, make_config):
         state = State()
         token = auth.new_device_token()
         device = state.add_device(
-            name="phone", token_hash=auth.hash_token(token), token_prefix=auth.display_prefix(token), paired_via="test"
+            name="phone",
+            token_hash=auth.hash_token(token),
+            token_prefix=auth.display_prefix(token),
+            paired_via="test",
+            limits=DeviceLimits.from_config(cfg.limits),
         )
         app = create_app(cfg, state, fingerprint="ab" * 32)
         # Use the production uvicorn config (guarded protocol, limits, shutdown hook).

@@ -46,6 +46,8 @@ class ServerConfig:
     # Connection caps (slowloris / resource exhaustion protection).
     max_connections: int = 512
     max_connections_per_ip: int = 32
+    # Requests forwarded to Ollama at once (all devices); the rest queue by priority.
+    max_upstream_concurrency: int = 4
 
 
 @dataclass
@@ -97,6 +99,15 @@ class LimitsConfig:
 
 
 @dataclass
+class BansConfig:
+    # N failed logins/pairing attempts within window_seconds -> ban, doubling per repeat.
+    failures: int = 10
+    window_seconds: int = 600
+    ban_seconds: int = 3600
+    max_ban_seconds: int = 7 * 86400
+
+
+@dataclass
 class LoggingConfig:
     audit_size: int = 5000
     request_log_size: int = 5000
@@ -112,6 +123,7 @@ class Config:
     tls: TLSConfig = field(default_factory=TLSConfig)
     pairing: PairingConfig = field(default_factory=PairingConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    bans: BansConfig = field(default_factory=BansConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_dir: Path = field(default_factory=default_config_dir)
 
@@ -119,7 +131,7 @@ class Config:
         s = self.server
         if not (1 <= s.port <= 65535):
             raise ConfigError(f"server.port out of range: {s.port}")
-        for name in ("max_body_bytes", "max_connections", "max_connections_per_ip"):
+        for name in ("max_body_bytes", "max_connections", "max_connections_per_ip", "max_upstream_concurrency"):
             if getattr(s, name) <= 0:
                 raise ConfigError(f"server.{name} must be positive")
         for name, value in (
@@ -134,6 +146,9 @@ class Config:
         for name in ("tokens_per_day", "tokens_per_month", "requests_per_minute", "max_num_ctx", "max_num_predict"):
             if getattr(lim, name) < 0:
                 raise ConfigError(f"limits.{name} must not be negative")
+        b = self.bans
+        if b.failures < 1 or b.window_seconds < 1 or b.ban_seconds < 1 or b.max_ban_seconds < b.ban_seconds:
+            raise ConfigError("bans: failures, window_seconds and ban_seconds must be positive; max >= ban_seconds")
         if lim.max_concurrent < 1:
             raise ConfigError("limits.max_concurrent must be at least 1")
         if self.tls.mode not in ("self-signed", "files", "off"):
@@ -252,7 +267,7 @@ def _apply(section_obj: typing.Any, data: dict, section: str) -> None:
         setattr(section_obj, key, _coerce(value, hints[key], f"{section}.{key}"))
 
 
-SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "logging")
+SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "bans", "logging")
 
 
 def load_config(path: Path | None = None, env: typing.Mapping[str, str] | None = None) -> Config:

@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from ..state import Device, PairingWindow, State, WindowState
+from ..state import Device, DeviceLimits, PairingWindow, State, WindowState
 from . import auth
 
 # Crockford base32: no I, L, O, U, so 0/O and 1/I/L can't be confused.
@@ -175,6 +175,7 @@ def claim(
     user_agent: str,
     now: float | None = None,
     allow_model_management: bool = False,
+    limits: "DeviceLimits | None" = None,
 ) -> ClaimResult:
     """Try to pair a device. ``kind`` is "code" (typed code) or "link" (URL secret).
 
@@ -226,6 +227,7 @@ def claim(
         token_prefix=auth.display_prefix(token),
         paired_via=matched,
         allow_model_management=allow_model_management,
+        limits=limits,
     )
     state.touch_device(device, ip, None, ua)
     window.device_id = device.id
