@@ -27,13 +27,15 @@ def _load(config_path: Optional[Path]):
 @cli.command()
 def serve(
     config_path: Optional[Path] = ConfigOption,
-    no_tui: bool = typer.Option(False, "--no-tui", help="Run headless (no admin TUI)"),
     dev_token: bool = typer.Option(
-        False, "--dev-token", help="Create a throwaway device and print its token (development only)"
+        False, "--dev-token", help="Create a 24h throwaway device and print its token (loopback only, development)"
     ),
 ) -> None:
     """Run the proxy server."""
+    import time
+
     from . import doctor
+    from .config import is_loopback_host
     from .server import auth
     from .server.app import create_app
     from .server.runner import build_server, prepare_tls
@@ -52,14 +54,22 @@ def serve(
         if finding.level != "ok":
             typer.secho(f"WARNING: {finding.title}. {finding.fix}", fg=typer.colors.RED, err=True)
     if dev_token:
+        if not is_loopback_host(config.server.host):
+            typer.secho("--dev-token is only allowed when listening on loopback", fg=typer.colors.RED, err=True)
+            raise typer.Exit(2)
         token = auth.new_device_token()
-        state.add_device(
-            name="dev", token_hash=auth.hash_token(token), token_prefix=auth.display_prefix(token), paired_via="dev"
+        device = state.add_device(
+            name="dev",
+            token_hash=auth.hash_token(token),
+            token_prefix=auth.display_prefix(token),
+            paired_via="dev",
+            token_expires_at=time.time() + 86400,
         )
-        typer.secho(f"Dev token (shown once): {token}", fg=typer.colors.YELLOW)
+        state.audit("dev_token_created", device_id=device.id)
+        typer.secho(f"Dev token (shown once, expires in 24h): {token}", fg=typer.colors.YELLOW)
 
     app = create_app(config, state)
-    server = build_server(config, app, tls_info)
+    server = build_server(config, app, state, tls_info)
     asyncio.run(server.serve())
 
 
