@@ -48,6 +48,8 @@ class ServerConfig:
     max_connections_per_ip: int = 32
     # Requests forwarded to Ollama at once (all devices); the rest queue by priority.
     max_upstream_concurrency: int = 4
+    # Seconds a request may wait in that queue before getting 503 "server busy".
+    queue_timeout: float = 120.0
 
 
 @dataclass
@@ -137,6 +139,7 @@ class Config:
         for name, value in (
             ("server.header_timeout", s.header_timeout),
             ("server.body_timeout", s.body_timeout),
+            ("server.queue_timeout", s.queue_timeout),
             ("ollama.connect_timeout", self.ollama.connect_timeout),
             ("ollama.read_timeout", self.ollama.read_timeout),
         ):
@@ -162,6 +165,11 @@ class Config:
             )
         if self.network.mode not in ("direct", "tailscale", "cloudflare", "letsencrypt"):
             raise ConfigError(f"unknown network.mode {self.network.mode!r}")
+        if self.network.mode == "cloudflare" and not self.network.trusted_proxies:
+            raise ConfigError(
+                "network.mode = 'cloudflare' needs network.trusted_proxies (usually [\"127.0.0.1/32\", \"::1/128\"] "
+                "for a local cloudflared); otherwise every client looks like the tunnel and bans can't work"
+            )
         for cidr in self.network.trusted_proxies:
             try:
                 ipaddress.ip_network(cidr, strict=False)
