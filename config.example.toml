@@ -1,0 +1,48 @@
+# OllamaGate example configuration.
+# Copy to your config dir (Linux: ~/.config/ollamagate/config.toml,
+# macOS: ~/Library/Application Support/ollamagate/config.toml,
+# Windows: %APPDATA%\ollamagate\config.toml) and keep it owner-readable only.
+# Any value can be overridden with env vars: OLLAMAGATE_<SECTION>__<KEY>, e.g.
+#   OLLAMAGATE_SERVER__PORT=9443
+
+[server]
+host = "127.0.0.1"          # interface to listen on (e.g. your Tailscale IP)
+port = 8443
+public_url = ""              # URL devices use to reach you; used in pairing links/QR
+max_body_bytes = 20971520    # 20 MB (vision models need room for images)
+
+[network]
+mode = "direct"              # direct | tailscale | cloudflare | letsencrypt
+trusted_proxies = []         # CIDRs allowed to set X-Forwarded-For / CF-Connecting-IP
+
+[ollama]
+url = "http://127.0.0.1:11434"   # must be loopback
+connect_timeout = 5.0
+read_timeout = 600.0
+
+[tls]
+mode = "self-signed"         # self-signed | files | off (off = loopback only)
+cert_file = ""
+key_file = ""
+extra_sans = []              # extra hostnames/IPs for the self-signed cert
+
+[pairing]
+ttl_seconds = 300
+max_attempts = 5
+requests_per_minute_per_ip = 10
+
+[limits]                     # defaults for every newly paired device (0 = unlimited)
+tokens_per_day = 0
+tokens_per_month = 0
+requests_per_minute = 60
+max_concurrent = 2
+max_num_ctx = 8192
+max_num_predict = 4096
+allowed_models = []          # empty = all installed models
+allow_model_management = false
+priority = "normal"          # low | normal | high
+
+[logging]
+audit_size = 5000
+request_log_size = 5000
+log_content = false          # never log prompts/responses unless you really mean it
