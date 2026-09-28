@@ -67,13 +67,19 @@ def authenticate(state: State, token: str | None, now: float | None = None) -> A
         return AuthOutcome(AuthResult.INVALID)
     token_hash = hash_token(token)
     device = state.device_by_token_hash(token_hash)
-    # The lookup is keyed by a hash of a 256-bit secret, so its timing leaks nothing
-    # useful; the explicit constant-time compare keeps the check obviously correct.
-    if device is None or not hmac.compare_digest(device.token_hash, token_hash):
-        return AuthOutcome(AuthResult.INVALID)
-    if device.status == DeviceStatus.REVOKED:
+    if device is None or device.status == DeviceStatus.REVOKED:
         return AuthOutcome(AuthResult.INVALID)
     now = time.time() if now is None else now
+    # The lookup is keyed by a hash of a 256-bit secret, so its timing leaks nothing
+    # useful; the explicit constant-time compares keep the check obviously correct.
+    current = hmac.compare_digest(device.token_hash, token_hash)
+    previous = (
+        device.previous_token_hash is not None
+        and hmac.compare_digest(device.previous_token_hash, token_hash)
+        and now < (device.previous_token_valid_until or 0)
+    )
+    if not (current or previous):
+        return AuthOutcome(AuthResult.INVALID)
     if device.token_expires_at is not None and now >= device.token_expires_at:
         return AuthOutcome(AuthResult.EXPIRED, device)
     if device.status == DeviceStatus.SUSPENDED:
