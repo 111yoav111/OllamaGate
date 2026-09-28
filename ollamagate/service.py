@@ -6,7 +6,7 @@ in memory: when the service restarts, devices must pair again.
 
 * Linux:   a systemd *user* unit (~/.config/systemd/user/ollamagate.service)
 * macOS:   a LaunchAgent (~/Library/LaunchAgents/com.ollamagate.plist)
-* Windows: a Task Scheduler task that starts at logon with limited rights
+* Windows: a script in the user's Startup folder (no admin rights needed)
 """
 
 from __future__ import annotations
@@ -31,11 +31,18 @@ class ServicePlan:
     deactivate: list[list[str]]
 
 
-def _serve_command(config_path: Path | None) -> list[str]:
-    cmd = [sys.executable, "-m", "ollamagate", "serve", "--no-tui"]
+def _serve_command(config_path: Path | None, python: str | None = None) -> list[str]:
+    cmd = [python or sys.executable, "-m", "ollamagate", "serve", "--no-tui"]
     if config_path is not None:
         cmd += ["--config", str(config_path.resolve())]
+    if any(ord(ch) < 0x20 for part in cmd for ch in part):
+        raise ValueError("paths with control characters can't be used in a service definition")
     return cmd
+
+
+def _systemd_exec(cmd: list[str]) -> str:
+    """Quote for ExecStart: systemd expands % specifiers and $VARIABLES itself."""
+    return shlex.join(cmd).replace("%", "%%").replace("$", "$$")
 
 
 def plan(config_path: Path | None = None, platform: str = sys.platform, home: Path | None = None) -> ServicePlan:
@@ -48,12 +55,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart={shlex.join(cmd)}
+ExecStart={_systemd_exec(cmd)}
 Restart=on-failure
 RestartSec=5
 # Hardening (user units can't use every option, but these work unprivileged).
 NoNewPrivileges=true
-PrivateTmp=true
 LockPersonality=true
 RestrictSUIDSGID=true
 
@@ -103,13 +109,19 @@ WantedBy=default.target
             deactivate=[["launchctl", "unload", "-w", str(path)]],
         )
     if platform == "win32":
-        task = subprocess.list2cmdline(cmd)
+        # A script in the user's Startup folder: needs no admin rights (logon tasks
+        # in Task Scheduler do) and runs with the user's own, limited permissions.
+        # pythonw.exe runs without a console window.
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        win_cmd = _serve_command(config_path, str(pythonw) if pythonw.exists() else None)
+        appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        path = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "OllamaGate.cmd"
+        script = "@echo off\r\nstart \"OllamaGate\" /min " + subprocess.list2cmdline(win_cmd) + "\r\n"
         return ServicePlan(
-            path=None,
-            content="",
-            activate=[["schtasks", "/Create", "/TN", "OllamaGate", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", task, "/F"],
-                      ["schtasks", "/Run", "/TN", "OllamaGate"]],
-            deactivate=[["schtasks", "/End", "/TN", "OllamaGate"], ["schtasks", "/Delete", "/TN", "OllamaGate", "/F"]],
+            path=path,
+            content=script,
+            activate=[["cmd", "/c", str(path)]],
+            deactivate=[],  # stop it from Task Manager, or `taskkill /im pythonw.exe` if nothing else uses it
         )
     raise RuntimeError(f"unsupported platform {platform!r}")
 

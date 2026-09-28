@@ -134,6 +134,10 @@ def check_tls(config: Config) -> list[Finding]:
         return [Finding("ok", "Plain HTTP on loopback only (TLS terminates at the tunnel)")]
     if config.tls.mode == "files":
         cert_path, key_path = Path(config.tls.cert_file), Path(config.tls.key_file)
+    elif config.network.mode == "tailscale":
+        cert_path, key_path = config.config_dir / "tls" / "tailscale.crt", config.config_dir / "tls" / "tailscale.key"
+        if not cert_path.exists():
+            return [Finding("ok", "The Tailscale certificate will be fetched on first start")]
     else:
         cert_path, key_path = config.config_dir / "tls" / "cert.pem", config.config_dir / "tls" / "key.pem"
         if not cert_path.exists():
@@ -177,6 +181,15 @@ def check_network_mode(config: Config) -> list[Finding]:
 
     mode = config.network.mode
     findings = []
+    if mode == "tailscale":
+        from .network import tailscale_info
+
+        try:
+            info = tailscale_info()
+        except Exception as exc:  # noqa: BLE001 - report whatever went wrong
+            return [Finding("error", f"Tailscale: {exc}", "Install Tailscale and run `tailscale up`.")]
+        findings.append(Finding("ok", f"Tailscale is running as {info.dns_name} ({info.ipv4 or info.ipv6})"))
+        return findings  # host, public URL and certificate are derived from Tailscale at start-up
     if is_loopback_host(urlsplit(config.base_url).hostname or "") and mode != "cloudflare":
         findings.append(
             Finding(
@@ -185,8 +198,6 @@ def check_network_mode(config: Config) -> list[Finding]:
                 "Set server.public_url (and server.host), or use network.mode = 'tailscale'.",
             )
         )
-    if mode == "tailscale" and shutil.which("tailscale") is None:
-        findings.append(Finding("error", "network.mode is 'tailscale' but the tailscale CLI is missing", "Install Tailscale."))
     if mode == "cloudflare":
         if shutil.which("cloudflared") is None:
             findings.append(Finding("warn", "cloudflared was not found on this machine", "Install cloudflared and run your tunnel."))

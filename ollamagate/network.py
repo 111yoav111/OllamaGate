@@ -19,8 +19,10 @@ and adjusts the in-memory config at startup; it never changes config.toml.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -50,6 +52,19 @@ class ModeResult:
     notes: list[str] = field(default_factory=list)
 
 
+# Tailscale addresses: 100.64.0.0/10 (CGNAT range) and fd7a:115c:a1e0::/48.
+_TAILNET = [ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48")]
+_HOSTNAME = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$", re.I)
+
+
+def _in_tailnet(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return any(addr in net for net in _TAILNET)
+
+
 def tailscale_info(run: Runner = _run) -> TailscaleInfo:
     """Read this machine's tailnet name and addresses from ``tailscale status --json``."""
     if shutil.which("tailscale") is None and run is _run:
@@ -68,6 +83,8 @@ def tailscale_info(run: Runner = _run) -> TailscaleInfo:
         raise ConfigError(f"tailscale is not running (state: {status.get('BackendState')})")
     if not dns_name:
         raise ConfigError("tailscale reports no DNS name; enable MagicDNS in the admin console")
+    if not _HOSTNAME.match(dns_name):
+        raise ConfigError(f"unexpected Tailscale DNS name {dns_name[:80]!r}")
     return TailscaleInfo(
         dns_name=dns_name,
         ipv4=next((ip for ip in ips if "." in ip), None),
@@ -80,6 +97,11 @@ def tailscale_cert(info: TailscaleInfo, tls_dir: Path, run: Runner = _run) -> tu
     tls_dir.mkdir(parents=True, exist_ok=True)
     cert, key = tls_dir / "tailscale.crt", tls_dir / "tailscale.key"
     proc = run(["tailscale", "cert", "--cert-file", str(cert), "--key-file", str(key), info.dns_name])
+    if proc.returncode != 0 and "access denied" in (proc.stderr + proc.stdout).lower():
+        raise ConfigError(
+            "tailscale cert needs permission: run `sudo tailscale set --operator=$USER` once, "
+            "then start OllamaGate again (as your normal user)"
+        )
     if proc.returncode != 0 or not cert.exists() or not key.exists():
         raise ConfigError(
             "tailscale cert failed - enable 'HTTPS certificates' in the Tailscale admin console "
@@ -98,10 +120,18 @@ def apply_network_mode(config: Config, run: Runner = _run) -> ModeResult:
     mode = config.network.mode
     if mode == "tailscale":
         info = tailscale_info(run)
-        if is_loopback_host(config.server.host) and info.ipv4:
-            # Default host: listen on the tailnet address only, never on the LAN.
-            config.server.host = info.ipv4
-            result.notes.append(f"listening on the Tailscale address {info.ipv4}")
+        tailnet_ip = info.ipv4 or info.ipv6
+        if not tailnet_ip:
+            raise ConfigError("tailscale reports no IP address for this machine")
+        if is_loopback_host(config.server.host) or config.server.host in ("0.0.0.0", "::", ""):
+            # Listen on the tailnet address only - never on the LAN or all interfaces.
+            config.server.host = tailnet_ip
+            result.notes.append(f"listening on the Tailscale address {tailnet_ip}")
+        elif not _in_tailnet(config.server.host):
+            raise ConfigError(
+                f"network.mode = 'tailscale' but server.host = {config.server.host!r} is not a Tailscale "
+                "address; leave server.host unset to use the tailnet address automatically"
+            )
         if not config.server.public_url:
             config.server.public_url = f"https://{info.dns_name}:{config.server.port}"
         if config.tls.mode == "self-signed":
