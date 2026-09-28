@@ -20,6 +20,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ..config import Config
 from ..state import RequestLogEntry, State
 from . import auth, pairing
+from .body import BodyTooLarge, read_body_limited
 from .netutil import parse_networks, resolve_client_ip
 from .pairing_routes import register_pairing_routes
 from .policy import EndpointKind, classify_endpoint
@@ -39,10 +40,6 @@ PROXY_METHODS = ["GET", "POST", "DELETE", "HEAD"]
 SWEEP_INTERVAL = 1.0
 
 
-class BodyTooLarge(Exception):
-    pass
-
-
 def error(status: int, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status, headers=headers)
 
@@ -50,18 +47,6 @@ def error(status: int, message: str, headers: dict[str, str] | None = None) -> J
 def unauthorized() -> JSONResponse:
     # Deliberately generic: no hint about why, no server/version info.
     return error(401, "unauthorized", {"WWW-Authenticate": "Bearer"})
-
-
-async def read_body_limited(request: Request, limit: int) -> bytes:
-    declared = request.headers.get("content-length")
-    if declared is not None and (not declared.isdigit() or int(declared) > limit):
-        raise BodyTooLarge()
-    body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > limit:
-            raise BodyTooLarge()
-    return bytes(body)
 
 
 class SecurityHeadersMiddleware:
@@ -172,7 +157,7 @@ def create_app(
         """Lets a device see what the server knows about it."""
         outcome = auth.authenticate(state, auth.extract_bearer(request.headers))
         if outcome.result is not auth.AuthResult.OK or outcome.device is None:
-            state.audit("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
+            state.audit_noisy("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
             return unauthorized()
         d = outcome.device
         lim = config.limits
@@ -204,7 +189,7 @@ def create_app(
         # 2. Authenticate.
         outcome = auth.authenticate(state, token)
         if outcome.result is not auth.AuthResult.OK:
-            state.audit(
+            state.audit_noisy(
                 "auth_failed",
                 ip=ip,
                 device_id=outcome.device.id if outcome.device else None,
@@ -231,7 +216,7 @@ def create_app(
             state.audit("limit_concurrency", ip=ip, device_id=device.id)
             return error(429, "too many concurrent requests", {"Retry-After": "1"})
         started = time.monotonic()
-        stream = state.register_stream(device.id, method, path)
+        stream = state.register_stream(device.id, method, path, auth.hash_token(token or ""))
 
         def finish(outcome_name: str, status: int, bytes_out: int) -> None:
             state.unregister_stream(stream)

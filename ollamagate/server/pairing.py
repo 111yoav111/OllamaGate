@@ -28,6 +28,9 @@ CODE_LEN = 8  # 40 bits; safe given the attempt cap and short TTL
 LINK_SECRET_BYTES = 16  # 128 bits
 METHODS = ("code", "qr", "link")
 MAX_NAME_LEN = 64
+# Wrong link/QR secrets get this many times the code's attempt budget: they are
+# 128-bit and can't be guessed, so the budget only exists to bound abuse.
+LINK_ATTEMPT_FACTOR = 10
 
 
 def new_code() -> str:
@@ -52,8 +55,10 @@ def clean_device_name(raw: object) -> str | None:
     """Return a safe display name, or None if unusable."""
     if not isinstance(raw, str):
         return None
-    # Drop control/format characters (incl. bidi overrides) so names can't spoof the TUI.
-    name = "".join(ch for ch in raw if unicodedata.category(ch)[0] not in ("C",))
+    # NFKC folds look-alike forms; then drop control/format characters (incl. bidi
+    # overrides and escape sequences) and leftover combining marks (stacking abuse).
+    name = unicodedata.normalize("NFKC", raw)
+    name = "".join(ch for ch in name if unicodedata.category(ch)[0] not in ("C", "M"))
     name = " ".join(name.split())
     if not name or len(name) > MAX_NAME_LEN:
         return None
@@ -195,10 +200,22 @@ def claim(
 
     ua = user_agent[:200]
     if matched is None:
-        window.attempts += 1
-        left = window.max_attempts - window.attempts
+        # Wrong codes use up the code's attempts; once they are gone only the code
+        # is disabled, so garbage guesses can't kill the unguessable QR/link secrets.
+        # Wrong link secrets have their own, larger budget.
+        if kind == "code":
+            window.attempts += 1
+            left = window.max_attempts - window.attempts
+            if left <= 0:
+                window.secret_hashes.pop("code", None)
+        else:
+            window.link_attempts += 1
+            left = window.max_attempts * LINK_ATTEMPT_FACTOR - window.link_attempts
+            if left <= 0:
+                window.secret_hashes.pop("qr", None)
+                window.secret_hashes.pop("link", None)
         state.audit("pairing_failed", ip=ip, window_id=window.id, kind=kind, user_agent=ua, attempts_left=left)
-        if left <= 0:
+        if not window.secret_hashes:
             close_window(state, WindowState.DESTROYED, reason="too many wrong attempts")
         return ClaimResult(ClaimError.INVALID, attempts_left=max(left, 0))
 

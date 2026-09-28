@@ -6,17 +6,20 @@ While no pairing window is open every ``/pair*`` route returns the same
 
 from __future__ import annotations
 
+import asyncio
 import json
 from importlib import resources
 from typing import Callable
 
 from fastapi import FastAPI, Request
+from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, Response
 
 from ..config import Config
 from ..state import State
 from . import pairing
-from .ratelimit import RateLimiter
+from .body import BodyTooLarge, read_body_limited
+from ..ratelimit import RateLimiter, client_key
 
 MAX_CLAIM_BODY = 4096
 
@@ -60,13 +63,14 @@ def register_pairing_routes(
         """Common checks: window open (else 404), then per-IP rate limit."""
         if pairing.current_window(state) is None:
             return not_found()
-        ip = client_ip(request) or "unknown"
-        if not limiter.hit(ip):
-            state.audit("pairing_rate_limited", ip=ip)
+        ip = client_ip(request)
+        key = client_key(ip)
+        if not limiter.hit(key):
+            state.audit_noisy("pairing_rate_limited", ip=ip)
             return JSONResponse(
                 {"error": "too many requests"},
                 status_code=429,
-                headers={"Retry-After": str(limiter.retry_after(ip))},
+                headers={"Retry-After": str(limiter.retry_after(key))},
             )
         return None
 
@@ -92,16 +96,19 @@ def register_pairing_routes(
         # JSON only: a cross-origin JSON POST needs a CORS preflight, which we never grant.
         if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
             return _json(415, {"error": "expected application/json"})
-        body = bytearray()
-        async for chunk in request.stream():
-            body += chunk
-            if len(body) > MAX_CLAIM_BODY:
-                return _json(413, {"error": "request too large"})
+        try:
+            body = await asyncio.wait_for(read_body_limited(request, MAX_CLAIM_BODY), config.server.body_timeout)
+        except BodyTooLarge:
+            return _json(413, {"error": "request too large"})
+        except asyncio.TimeoutError:
+            return _json(408, {"error": "request body timeout"})
+        except ClientDisconnect:
+            return Response(status_code=499)
         try:
             data = json.loads(body)
             if not isinstance(data, dict):
                 raise ValueError
-        except ValueError:
+        except (ValueError, RecursionError):
             return _json(400, {"error": "invalid JSON"})
 
         code, secret = data.get("code"), data.get("secret")

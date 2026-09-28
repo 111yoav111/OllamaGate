@@ -19,8 +19,12 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from .ratelimit import RateLimiter, client_key
+from .textsafe import safe_text
+
 MAX_IP_HISTORY = 20
 MAX_AUDIT_FIELD = 200
+NOISY_EVENTS_PER_MINUTE = 10
 
 
 class DeviceStatus(str, enum.Enum):
@@ -75,7 +79,8 @@ class PairingWindow:
     max_attempts: int
     # method ("code" | "qr" | "link") -> sha256 hex of that method's secret
     secret_hashes: dict[str, str]
-    attempts: int = 0
+    attempts: int = 0  # wrong codes
+    link_attempts: int = 0  # wrong QR/link secrets
     state: WindowState = WindowState.OPEN
     device_id: str | None = None  # set when used
 
@@ -109,6 +114,7 @@ class ActiveStream:
     method: str
     path: str
     started_at: float
+    token_hash: str = ""  # which credential opened it (matters during rotation grace)
     killed: asyncio.Event = field(default_factory=asyncio.Event)
     kill_reason: str = ""
 
@@ -118,9 +124,10 @@ class ActiveStream:
             self.killed.set()
 
 
-def _truncate(value: Any) -> Any:
-    if isinstance(value, str) and len(value) > MAX_AUDIT_FIELD:
-        return value[:MAX_AUDIT_FIELD] + "…"
+def _clean(value: Any) -> Any:
+    """Escape control characters and bound the length of audit strings."""
+    if isinstance(value, str):
+        return safe_text(value, MAX_AUDIT_FIELD)
     return value
 
 
@@ -134,6 +141,10 @@ class State:
         self.pairing_window: PairingWindow | None = None
         self.pairing_history: deque[PairingWindow] = deque(maxlen=50)
         self.lock = asyncio.Lock()
+        # Unauthenticated noise (failed logins etc.) is capped per client so an
+        # attacker can't flush real events out of the bounded audit log.
+        self._noise_limiter = RateLimiter(NOISY_EVENTS_PER_MINUTE, 60.0)
+        self.audit_suppressed = 0
         self.started_at = time.time()
         self.version = 0
 
@@ -148,13 +159,21 @@ class State:
         entry = AuditEntry(
             ts=time.time(),
             event=event,
-            ip=ip,
+            ip=_clean(ip),
             device_id=device_id,
-            detail={k: _truncate(v) for k, v in detail.items()},
+            detail={k: _clean(v) for k, v in detail.items()},
         )
         self.audit_log.append(entry)
         self._changed()
         return entry
+
+    def audit_noisy(self, event: str, *, ip: str | None, **detail: Any) -> AuditEntry | None:
+        """Audit an event an unauthenticated client can trigger at will, at most
+        NOISY_EVENTS_PER_MINUTE times per client per event; the rest are counted."""
+        if not self._noise_limiter.hit(f"{event}|{client_key(ip)}"):
+            self.audit_suppressed += 1
+            return None
+        return self.audit(event, ip=ip, **detail)
 
     def log_request(self, entry: RequestLogEntry) -> None:
         self.request_log.append(entry)
@@ -229,7 +248,7 @@ class State:
         device.last_ip = ip
         device.last_port = port
         if user_agent:
-            device.user_agent = user_agent[:512]
+            device.user_agent = safe_text(user_agent, 512)
         new_ip = False
         if ip is not None:
             record = device.ip_history.get(ip)
@@ -250,6 +269,8 @@ class State:
         if device.status is DeviceStatus.REVOKED:
             raise ValueError("a revoked device cannot change status")
         device.status = status
+        if status is not DeviceStatus.ACTIVE:
+            self.kill_device_streams(device_id, status.value)
         self._changed()
         return device
 
@@ -288,9 +309,14 @@ class State:
 
     # ----- active streams ------------------------------------------------------
 
-    def register_stream(self, device_id: str, method: str, path: str) -> ActiveStream:
+    def register_stream(self, device_id: str, method: str, path: str, token_hash: str = "") -> ActiveStream:
         stream = ActiveStream(
-            id=uuid.uuid4().hex, device_id=device_id, method=method, path=path, started_at=time.time()
+            id=uuid.uuid4().hex,
+            device_id=device_id,
+            method=method,
+            path=path,
+            started_at=time.time(),
+            token_hash=token_hash,
         )
         self.streams[stream.id] = stream
         self._changed()
@@ -322,8 +348,12 @@ class State:
         now = time.time() if now is None else now
         for device in self._devices.values():
             if device.previous_token_hash and (device.previous_token_valid_until or 0) <= now:
-                self._device_by_token_hash.pop(device.previous_token_hash, None)
+                old = device.previous_token_hash
+                self._device_by_token_hash.pop(old, None)
                 device.previous_token_hash = device.previous_token_valid_until = None
+                for s in self.device_streams(device.id):
+                    if s.token_hash == old:
+                        s.kill("token rotated")
                 self._changed()
             expired = device.token_expires_at is not None and now >= device.token_expires_at
             if (expired or device.status is not DeviceStatus.ACTIVE) and self.device_streams(device.id):
