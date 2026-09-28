@@ -37,10 +37,21 @@ async def shot(app: GateTUI, name: str) -> None:
         app.save_screenshot(filename=f"{name}.svg", path=SHOTS)
 
 
+async def until(pilot, condition, timeout: float = 5.0) -> bool:
+    """Wait for the TUI's (1 s) refresh to catch up instead of guessing a sleep."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if condition():
+            return True
+        await pilot.pause(0.1)
+    return condition()
+
+
 def plain(app: GateTUI, selector: str) -> str:
     from rich.console import Console
 
-    console = Console(width=200, record=True, file=open(os.devnull, "w"))
+    console = Console(width=200, record=True, file=open(os.devnull, "w", encoding="utf-8"))
     console.print(app.query_one(selector).content)
     return console.export_text()
 
@@ -79,8 +90,8 @@ async def test_pairing_flow_shows_code_qr_and_success():
             admin.state, secret=code, kind="code", device_name="Tablet", ip="198.51.100.4", user_agent="curl/8"
         )
         assert result.error is None
-        await pilot.pause(0.7)
-        assert "Paired" in plain(app, "#pairing-info") and "Tablet" in plain(app, "#pairing-info")
+        assert await until(pilot, lambda: "Paired" in plain(app, "#pairing-info"))
+        assert "Tablet" in plain(app, "#pairing-info")
         assert app._pairing is None
 
 
@@ -90,8 +101,7 @@ async def test_pairing_replaced_elsewhere_is_detected():
     async with app.run_test(size=(140, 60)) as pilot:
         await pilot.press("p")
         admin.open_pairing()  # e.g. `ollamagate pair` from another terminal
-        await pilot.pause(1.2)
-        assert "replaced" in plain(app, "#pairing-info")
+        assert await until(pilot, lambda: "replaced" in plain(app, "#pairing-info"))
 
 
 async def test_revoke_requires_confirmation():
@@ -277,8 +287,7 @@ async def test_live_update_on_new_device(n):
         await pilot.press("2")
         for i in range(n):
             add_device(admin.state, f"dev{i}")
-        await pilot.pause(0.7)
-        assert app.query_one("#device-table").row_count == n
+        assert await until(pilot, lambda: app._q("#device-table").row_count == n)
 
 
 # ----- Phase 3 council regressions -------------------------------------------------------
@@ -291,9 +300,8 @@ async def test_markup_in_device_name_cannot_crash_toasts():
     async with app.run_test(size=(140, 45), notifications=True) as pilot:
         s = admin.open_pairing()
         pairing.claim(admin.state, secret=s["code"], kind="code", device_name="[/x] [b]x", ip="1.2.3.4", user_agent="")
-        await pilot.pause(1.3)
+        assert await until(pilot, lambda: any("[/x]" in n.message for n in app._notifications))
         assert app.is_running
-        assert any("[/x]" in n.message for n in app._notifications)
 
 
 async def test_toasts_keep_working_when_audit_log_is_full():
@@ -305,8 +313,7 @@ async def test_toasts_keep_working_when_audit_log_is_full():
         await pilot.pause(1.2)
         device_id = add_device(admin.state, "late")
         admin.state.audit("pairing_succeeded", device_id=device_id)
-        await pilot.pause(1.3)
-        assert any("late" in n.message for n in app._notifications)
+        assert await until(pilot, lambda: any("late" in n.message for n in app._notifications))
 
 
 async def test_ctrl_q_asks_first():
@@ -352,7 +359,7 @@ async def test_audit_cursor_stays_on_entry():
         table.move_cursor(row=5)
         key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         admin.state.audit("admin_test", n=99)
-        await pilot.pause(1.3)
+        assert await until(pilot, lambda: app._audit_rendered_seq == admin.state.audit_seq)
         assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == key
 
 
@@ -364,8 +371,7 @@ async def test_device_rows_update_in_place():
         await pilot.press("2")
         admin.state.add_usage(device_id, requests=7)
         admin.state._changed()
-        await pilot.pause(1.3)
-        assert app._q("#device-table").get_row_at(0)[8].plain == "7"
+        assert await until(pilot, lambda: app._q("#device-table").get_row_at(0)[8].plain == "7")
 
 
 async def test_settings_tab_reflects_cli_changes():
@@ -374,8 +380,7 @@ async def test_settings_tab_reflects_cli_changes():
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.press("5")
         admin.set_setting("pairing.max_attempts", 3)  # e.g. via `ollamagate settings set`
-        await pilot.pause(1.3)
-        assert app._q("#set-pairing-max_attempts").value == "3"
+        assert await until(pilot, lambda: app._q("#set-pairing-max_attempts").value == "3")
 
 
 async def test_unexpected_error_in_action_does_not_kill_tui(monkeypatch):
