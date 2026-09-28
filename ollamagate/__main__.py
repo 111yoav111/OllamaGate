@@ -62,6 +62,7 @@ def _ts(value: float | None) -> str:
 def serve(
     config_path: Optional[Path] = ConfigOption,
     no_tui: bool = typer.Option(False, "--no-tui", help="Run headless (manage it with the CLI commands)"),
+    allow_root: bool = typer.Option(False, "--allow-root", help="Run even as root/Administrator (not recommended)"),
 ) -> None:
     """Run the proxy server with the admin TUI (or headless with --no-tui)."""
     from collections import deque
@@ -78,12 +79,14 @@ def serve(
     config = _load(config_path)
     from . import service as _service
 
-    if _service.running_as_admin():
+    if _service.running_as_admin() and not allow_root:
         typer.secho(
-            "WARNING: running as root/Administrator. Run OllamaGate as a normal user.",
+            "Refusing to run as root/Administrator: run OllamaGate as a normal user "
+            "(or pass --allow-root if you really must, e.g. inside a container).",
             fg=typer.colors.RED,
             err=True,
         )
+        raise typer.Exit(2)
     from .network import apply_network_mode
 
     try:
@@ -93,17 +96,15 @@ def serve(
         raise typer.Exit(2)
     log_lines: deque[str] = deque(maxlen=200)
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-    if no_tui:
-        logging.basicConfig(level=logging.INFO, format=fmt)
-    else:
-        # Logging to the terminal would corrupt the TUI; keep recent lines in memory instead.
-        handler = _BufferHandler(log_lines)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
-        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    configure_logging(no_tui, log_lines)
 
+    for note in network_notes:
+        log_lines.append(f"network: {note}")
     state = State(config.logging.audit_size, config.logging.request_log_size)
     tls_info = prepare_tls(config)
-    fingerprint = tls_info.fingerprint if tls_info else None
+    # Only a self-signed certificate is pinned in pairing links; CA-issued ones
+    # (Tailscale, Let's Encrypt) are renewed and reloaded, so a pin would go stale.
+    fingerprint = tls_info.fingerprint if tls_info and config.tls.mode == "self-signed" else None
 
     warnings = [f"{f.title}. {f.fix}" for f in doctor.check_ollama_binding(config) if f.level != "ok"]
 
@@ -190,10 +191,29 @@ async def _maintenance(config: Config, server: Any, tls_info: Any) -> None:
 
             try:  # tailscale renews only when needed; cheap to ask daily
                 await asyncio.to_thread(lambda: tailscale_cert(tailscale_info(), config.config_dir / "tls"))
-            except ConfigError as exc:
+            except Exception as exc:  # noqa: BLE001 - upkeep must keep running
                 log.warning("tailscale certificate renewal failed: %s", exc)
-        if reloader is not None and reloader.check():
-            log.info("TLS certificate changed on disk; reloaded without restarting")
+        try:
+            if reloader is not None and reloader.check():
+                log.info("TLS certificate changed on disk; reloaded without restarting")
+        except Exception as exc:  # noqa: BLE001 - upkeep must keep running
+            log.warning("certificate reload check failed: %s", type(exc).__name__)
+
+
+def configure_logging(headless: bool, log_lines: Any) -> None:
+    """Headless: log to stderr. With the TUI: keep recent lines in memory instead,
+    because writing to the terminal would corrupt the TUI."""
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if headless:
+        logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+    else:
+        handler = _BufferHandler(log_lines)
+        handler.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    # httpx/httpcore log every request URL at INFO. Notification URLs contain secrets
+    # (the Telegram bot token, the ntfy topic), so keep those loggers quiet.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 class _BufferHandler(logging.Handler):
@@ -556,7 +576,11 @@ def _run_commands(commands: list[list[str]], dry_run: bool) -> None:
         cmd = [c for c in cmd if c]  # e.g. no $USER for loginctl
         typer.echo("  $ " + shlex.join(cmd))
         if not dry_run:
-            result = subprocess.run(cmd, check=False)
+            try:
+                result = subprocess.run(cmd, check=False)
+            except OSError as exc:
+                typer.secho(f"    could not run {cmd[0]}: {exc.strerror or exc}", fg=typer.colors.YELLOW)
+                continue
             if result.returncode != 0:
                 typer.secho(f"    (exit code {result.returncode})", fg=typer.colors.YELLOW)
 
@@ -593,6 +617,8 @@ def service_uninstall(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
     if p.path is not None and p.path.exists() and not dry_run:
         p.path.unlink()
         typer.echo(f"Removed {p.path}")
+    if p.path is not None and p.path.suffix == ".service":
+        _run_commands([["systemctl", "--user", "daemon-reload"]], dry_run)
 
 
 # ----- audit / doctor ------------------------------------------------------------------
