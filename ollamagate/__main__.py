@@ -413,6 +413,91 @@ def settings_set(key: str, value: str, config_path: Optional[Path] = ConfigOptio
     typer.echo(f"{key} = {value}")
 
 
+@devices_cli.command("limits")
+def devices_limits(
+    device_id: str,
+    config_path: Optional[Path] = ConfigOption,
+    tokens_per_day: Optional[int] = typer.Option(None, help="0 = unlimited"),
+    tokens_per_month: Optional[int] = typer.Option(None, help="0 = unlimited"),
+    requests_per_minute: Optional[int] = typer.Option(None, help="0 = unlimited"),
+    max_concurrent: Optional[int] = typer.Option(None),
+    max_num_ctx: Optional[int] = typer.Option(None, help="0 = don't clamp"),
+    max_num_predict: Optional[int] = typer.Option(None, help="0 = don't clamp"),
+    allowed_models: Optional[str] = typer.Option(None, help='comma-separated; "" = all models'),
+    priority: Optional[str] = typer.Option(None, help="low, normal or high"),
+) -> None:
+    """Show or change a device's limits (changes last until restart)."""
+    changes = {
+        k: v
+        for k, v in {
+            "tokens_per_day": tokens_per_day,
+            "tokens_per_month": tokens_per_month,
+            "requests_per_minute": requests_per_minute,
+            "max_concurrent": max_concurrent,
+            "max_num_ctx": max_num_ctx,
+            "max_num_predict": max_num_predict,
+            "allowed_models": allowed_models,
+            "priority": priority,
+        }.items()
+        if v is not None
+    }
+    d = _call(config_path, "devices.limits", ref=device_id, **changes) if changes else _call(
+        config_path, "devices.show", ref=device_id
+    )
+    typer.echo(f"Limits for {safe(d['name'])}:")
+    for key, value in d["limits"].items():
+        shown = ", ".join(value) or "all" if isinstance(value, list) else value
+        typer.echo(f"  {key:20} {safe(shown)}")
+    typer.echo(f"  {'usage':20} {d['tokens_today']} tokens today, {d['tokens_month']} this month")
+
+
+@devices_cli.command("ban-ip")
+def devices_ban_ip(
+    device_id: str,
+    config_path: Optional[Path] = ConfigOption,
+    seconds: Optional[int] = typer.Option(None, help="ban duration (default: until lifted)"),
+) -> None:
+    """Ban the IP a device last connected from."""
+    r = _call(config_path, "devices.ban_ip", ref=device_id, seconds=seconds)
+    typer.echo(f"Banned {safe(r['key'])}; {r['streams_killed']} request(s) cut.")
+
+
+bans_cli = typer.Typer(no_args_is_help=True, help="View and manage IP bans")
+cli.add_typer(bans_cli, name="bans")
+
+
+@bans_cli.command("list")
+def bans_list(config_path: Optional[Path] = ConfigOption) -> None:
+    """List active bans."""
+    bans = _call(config_path, "bans.list")
+    if not bans:
+        typer.echo("No active bans.")
+        return
+    for b in bans:
+        until = "until lifted" if b["until"] is None else f"until {_ts(b['until'])}"
+        kind = "manual" if b["manual"] else f"auto, strike {b['strikes']}"
+        typer.echo(f"{safe(b['key']):42} {until:28} {kind:16} {safe(b['reason'])}")
+
+
+@bans_cli.command("add")
+def bans_add(
+    ip: str,
+    config_path: Optional[Path] = ConfigOption,
+    seconds: Optional[int] = typer.Option(None, help="ban duration (default: until lifted)"),
+    reason: str = typer.Option("manual", help="note for the audit log"),
+) -> None:
+    """Ban an IP address (IPv6: its whole /64)."""
+    r = _call(config_path, "bans.add", ip=ip, seconds=seconds, reason=reason)
+    typer.echo(f"Banned {safe(r['key'])}; {r['streams_killed']} request(s) cut.")
+
+
+@bans_cli.command("remove")
+def bans_remove(ip: str, config_path: Optional[Path] = ConfigOption) -> None:
+    """Lift a ban."""
+    r = _call(config_path, "bans.remove", ip=ip)
+    typer.echo("Ban lifted." if r["removed"] else "No such ban.")
+
+
 # ----- audit / doctor ------------------------------------------------------------------
 
 
