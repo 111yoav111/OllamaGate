@@ -171,12 +171,12 @@ def test_notifier_sends_secret_free_messages():
         await asyncio.sleep(0.05)
         task.cancel()
         await client.aclose()
-        return token
+        return token, notifier
 
-    token = asyncio.run(run())
-    assert [url for url, _ in sent] == ["https://ntfy.example/topic"] * 2
-    assert "New device paired: Anna's phone (via qr) from 203.0.113.5" in sent[0][1]
-    assert "Auto-banned 198.51.100.1" in sent[1][1]
+    token, notifier = asyncio.run(run())
+    assert [url for url, _ in sent] == ["https://ntfy.example/topic"]
+    assert 'New device paired: "Anna\'s phone" (via qr) from 203.0.113.5' in sent[0][1]
+    assert notifier.pending_bans == 1  # bans go out as a per-minute summary
     assert all(token not in body for _, body in sent)
 
 
@@ -215,10 +215,11 @@ def test_launchd_plist_escapes_paths(tmp_path):
     assert p.activate == [["launchctl", "load", "-w", str(p.path)]]
 
 
-def test_windows_task_runs_with_limited_rights():
-    p = service.plan(None, platform="win32")
-    create = p.activate[0]
-    assert create[create.index("/RL") + 1] == "LIMITED" and "--no-tui" in create[create.index("/TR") + 1]
+def test_windows_uses_startup_folder_without_admin(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    p = service.plan(None, platform="win32", home=tmp_path)
+    assert p.path == tmp_path / "Microsoft/Windows/Start Menu/Programs/Startup/OllamaGate.cmd"
+    assert "serve --no-tui" in p.content and "schtasks" not in p.content
 
 
 def test_service_install_refuses_root(monkeypatch):
