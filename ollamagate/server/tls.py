@@ -139,3 +139,40 @@ def build_server_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
     ctx.load_cert_chain(str(cert_path), str(key_path))
     return ctx
+
+
+class CertReloader:
+    """Reload a renewed certificate into a live SSL context.
+
+    Let's Encrypt and Tailscale certificates are renewed every few weeks. Loading
+    the new files into the *same* SSLContext makes new connections use them
+    without restarting (a restart would disconnect every device, since all
+    state is in memory).
+    """
+
+    def __init__(self, ctx: ssl.SSLContext, cert_path: Path, key_path: Path) -> None:
+        self.ctx = ctx
+        self.cert_path = cert_path
+        self.key_path = key_path
+        self._stamp = self._current_stamp()
+
+    def _current_stamp(self) -> tuple[float, float] | None:
+        try:
+            return (self.cert_path.stat().st_mtime, self.key_path.stat().st_mtime)
+        except OSError:
+            return None
+
+    def check(self) -> bool:
+        """Reload if the files changed. Returns True when a new certificate was loaded."""
+        stamp = self._current_stamp()
+        if stamp is None or stamp == self._stamp:
+            return False
+        try:
+            # Validate the pair on a throwaway context first: a failed load_cert_chain
+            # can leave the live context half-updated and break every new handshake.
+            build_server_context(self.cert_path, self.key_path)
+            self.ctx.load_cert_chain(str(self.cert_path), str(self.key_path))
+        except (OSError, ssl.SSLError):
+            return False  # half-written or mismatched pair: keep the old one, retry later
+        self._stamp = stamp
+        return True

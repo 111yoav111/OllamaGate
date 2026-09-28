@@ -51,6 +51,13 @@ window_seconds = 600
 ban_seconds = 3600           # ... ban the client for this long, doubling on repeat offences
 max_ban_seconds = 604800
 
+[notify]                     # owner alerts; every channel is off by default
+ntfy_url = ""                # e.g. "https://ntfy.sh/<a-long-random-topic>"
+telegram_bot_token = ""      # keep this file chmod 600 if you use Telegram
+telegram_chat_id = ""
+desktop = false              # notify-send (Linux) / osascript (macOS)
+events = ["pairing", "new_ip", "ban", "lockdown"]
+
 [logging]
 audit_size = 5000
 request_log_size = 5000

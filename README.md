@@ -4,21 +4,22 @@ A secure pairing proxy that lets your own devices use the Ollama models on your
 home PC over the internet. Knowing the server's address gives no access: a device
 has to **pair** first (code, QR or link), then it gets its own revocable token.
 
-> **Status:** Phases 1-4 are done: TLS, a hardened streaming passthrough to
-> Ollama, pairing by code / QR / link, a live admin TUI plus CLI, per-device
-> quotas and limits, auto-bans, and a built-in browser chat. Phase 5
-> (Tailscale / Cloudflare / Let's Encrypt, service install) is next.
+> **Status:** all five build phases are done: TLS and a hardened streaming
+> passthrough, pairing by code / QR / link, a live admin TUI plus CLI,
+> per-device quotas and limits, auto-bans, a built-in browser chat, and
+> Tailscale / Cloudflare / Let's Encrypt modes, notifications and service
+> install.
 
 ## Requirements
 
 - Python 3.11+
 - Ollama running on the same machine, bound to loopback (`OLLAMA_HOST=127.0.0.1`)
 
-## Install (development)
+## Install
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"      # Windows: .venv\Scripts\pip install -e ".[dev]"
+pipx install git+https://github.com/111yoav111/OllamaGate    # or, for development:
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"     # Windows: .venv\Scripts\pip
 ```
 
 ## Run
@@ -131,6 +132,44 @@ startup and included in pairing links so clients can pin it.
 while running, the admin channel files in `run/` are on disk. Restarting the server forgets every device; they
 must pair again.
 
+## Reaching it from the internet
+
+Pick one `network.mode` in `config.toml` (most recommended first):
+
+| Mode | What you need | What OllamaGate does |
+|---|---|---|
+| `tailscale` | Tailscale on the PC and your devices, *HTTPS certificates* enabled in the Tailscale admin console | listens only on the PC's Tailscale IP, gets a real certificate with `tailscale cert` (renewed and hot-reloaded), and uses `https://<pc>.<tailnet>.ts.net:8443` in pairing links. Devices must be on your tailnet **and** paired. |
+| `cloudflare` | a `cloudflared` tunnel pointing at `http://127.0.0.1:8443` (with `[tls] mode = "off"`) | stays on loopback, trusts only the local tunnel for client IPs; set `server.public_url` to the tunnel hostname. No router ports opened. |
+| `letsencrypt` | your own domain, certbot, a router port-forward | uses `[tls] mode = "files"` with certbot's certificate (copy it to an owner-only place with a deploy hook); renewals are picked up without a restart. |
+| `direct` (default) | nothing | self-signed certificate: works, but every browser shows a warning. |
+
+```toml
+[network]
+mode = "tailscale"
+```
+
+`ollamagate doctor` checks the whole setup: Ollama running and not exposed,
+certificate validity and name, network mode prerequisites, file permissions.
+
+## Notifications
+
+OllamaGate can tell you when a device pairs, a device shows up from a new IP,
+a client gets banned, or lockdown changes - via [ntfy](https://ntfy.sh), a
+Telegram bot, or a desktop notification. All off by default; see `[notify]`
+in `config.example.toml`. Messages never contain tokens or prompts.
+
+## Running as a service
+
+```bash
+ollamagate service install     # systemd user unit / macOS LaunchAgent / Windows Startup folder
+ollamagate service uninstall
+```
+
+The service runs as your normal user, headless; manage it with the CLI
+commands above. `serve` refuses to run as root/Administrator unless you pass
+`--allow-root`. In Tailscale mode on Linux, allow your user to fetch
+certificates once with `sudo tailscale set --operator=$USER`. Restarting it forgets all devices (state is in memory).
+
 ## Configuration
 
 Copy `config.example.toml` to your config directory as `config.toml`:
@@ -171,4 +210,8 @@ Everything else returns `404`. Model management (`pull`, `push`, `delete`,
 2. ~~Pairing (code / QR / link) and device management CLI~~
 3. ~~Admin TUI~~
 4. ~~Quotas, rate limits, auto-bans, lockdown, browser chat~~
-5. Tailscale / Cloudflare / Let's Encrypt modes, service install, packaging
+5. ~~Tailscale / Cloudflare / Let's Encrypt modes, doctor, notifications, service install, packaging~~
+
+Possible next steps (need new dependencies, so not done without your OK):
+offline GeoIP lookup (MaxMind GeoLite2), mTLS client certificates, TOTP for
+sensitive admin commands.

@@ -62,6 +62,7 @@ def _ts(value: float | None) -> str:
 def serve(
     config_path: Optional[Path] = ConfigOption,
     no_tui: bool = typer.Option(False, "--no-tui", help="Run headless (manage it with the CLI commands)"),
+    allow_root: bool = typer.Option(False, "--allow-root", help="Run even as root/Administrator (not recommended)"),
 ) -> None:
     """Run the proxy server with the admin TUI (or headless with --no-tui)."""
     from collections import deque
@@ -76,19 +77,34 @@ def serve(
     from .state import State
 
     config = _load(config_path)
+    from . import service as _service
+
+    if _service.running_as_admin() and not allow_root:
+        typer.secho(
+            "Refusing to run as root/Administrator: run OllamaGate as a normal user "
+            "(or pass --allow-root if you really must, e.g. inside a container).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(2)
+    from .network import apply_network_mode
+
+    try:
+        network_notes = apply_network_mode(config).notes
+    except ConfigError as exc:
+        typer.secho(f"Network setup error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     log_lines: deque[str] = deque(maxlen=200)
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-    if no_tui:
-        logging.basicConfig(level=logging.INFO, format=fmt)
-    else:
-        # Logging to the terminal would corrupt the TUI; keep recent lines in memory instead.
-        handler = _BufferHandler(log_lines)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
-        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    configure_logging(no_tui, log_lines)
 
+    for note in network_notes:
+        log_lines.append(f"network: {note}")
     state = State(config.logging.audit_size, config.logging.request_log_size)
     tls_info = prepare_tls(config)
-    fingerprint = tls_info.fingerprint if tls_info else None
+    # Only a self-signed certificate is pinned in pairing links; CA-issued ones
+    # (Tailscale, Let's Encrypt) are renewed and reloaded, so a pin would go stale.
+    fingerprint = tls_info.fingerprint if tls_info and config.tls.mode == "self-signed" else None
 
     warnings = [f"{f.title}. {f.fix}" for f in doctor.check_ollama_binding(config) if f.level != "ok"]
 
@@ -100,6 +116,8 @@ def serve(
 
     if no_tui:
         typer.echo(f"OllamaGate listening on {config.base_url}")
+        for note in network_notes:
+            typer.echo(f"  {note}")
         if tls_info:
             typer.echo(f"TLS certificate SHA-256: {format_fingerprint(tls_info.fingerprint)}")
         from urllib.parse import urlsplit
@@ -117,6 +135,11 @@ def serve(
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
         server_task = asyncio.ensure_future(server.serve(sockets=[sock]))
+        upkeep = asyncio.ensure_future(_maintenance(config, server, tls_info))
+        from . import notify
+
+        notifier = notify.attach(state, config.notify)
+        notify_task = asyncio.ensure_future(notifier.run()) if notifier else None
         try:
             if not no_tui:
                 from .tui.app import GateTUI
@@ -145,9 +168,52 @@ def serve(
                     )
             await server_task
         finally:
+            upkeep.cancel()
+            if notify_task is not None:
+                notify_task.cancel()
             await control.close()
 
     asyncio.run(main())
+
+
+async def _maintenance(config: Config, server: Any, tls_info: Any) -> None:
+    """Background upkeep while serving: renew and hot-reload certificates."""
+    from .server.tls import CertReloader
+
+    log = logging.getLogger("ollamagate")
+    reloader = CertReloader(server.config.ssl, tls_info.cert_path, tls_info.key_path) if tls_info else None
+    last_renewal = time.monotonic()
+    while True:
+        await asyncio.sleep(60)
+        if config.network.mode == "tailscale" and time.monotonic() - last_renewal > 86400:
+            last_renewal = time.monotonic()
+            from .network import tailscale_cert, tailscale_info
+
+            try:  # tailscale renews only when needed; cheap to ask daily
+                await asyncio.to_thread(lambda: tailscale_cert(tailscale_info(), config.config_dir / "tls"))
+            except Exception as exc:  # noqa: BLE001 - upkeep must keep running
+                log.warning("tailscale certificate renewal failed: %s", exc)
+        try:
+            if reloader is not None and reloader.check():
+                log.info("TLS certificate changed on disk; reloaded without restarting")
+        except Exception as exc:  # noqa: BLE001 - upkeep must keep running
+            log.warning("certificate reload check failed: %s", type(exc).__name__)
+
+
+def configure_logging(headless: bool, log_lines: Any) -> None:
+    """Headless: log to stderr. With the TUI: keep recent lines in memory instead,
+    because writing to the terminal would corrupt the TUI."""
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if headless:
+        logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+    else:
+        handler = _BufferHandler(log_lines)
+        handler.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
+        logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    # httpx/httpcore log every request URL at INFO. Notification URLs contain secrets
+    # (the Telegram bot token, the ntfy topic), so keep those loggers quiet.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 class _BufferHandler(logging.Handler):
@@ -496,6 +562,63 @@ def bans_remove(ip: str, config_path: Optional[Path] = ConfigOption) -> None:
     """Lift a ban."""
     r = _call(config_path, "bans.remove", ip=ip)
     typer.echo("Ban lifted." if r["removed"] else "No such ban.")
+
+
+service_cli = typer.Typer(no_args_is_help=True, help="Run OllamaGate in the background (per-user service)")
+cli.add_typer(service_cli, name="service")
+
+
+def _run_commands(commands: list[list[str]], dry_run: bool) -> None:
+    import shlex
+    import subprocess
+
+    for cmd in commands:
+        cmd = [c for c in cmd if c]  # e.g. no $USER for loginctl
+        typer.echo("  $ " + shlex.join(cmd))
+        if not dry_run:
+            try:
+                result = subprocess.run(cmd, check=False)
+            except OSError as exc:
+                typer.secho(f"    could not run {cmd[0]}: {exc.strerror or exc}", fg=typer.colors.YELLOW)
+                continue
+            if result.returncode != 0:
+                typer.secho(f"    (exit code {result.returncode})", fg=typer.colors.YELLOW)
+
+
+@service_cli.command("install")
+def service_install(
+    config_path: Optional[Path] = ConfigOption,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be written and run"),
+) -> None:
+    """Install and start OllamaGate as a service for the current user (headless)."""
+    from . import service
+
+    if service.running_as_admin():
+        typer.secho("Refusing to install as root/Administrator: run this as your normal user.", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    p = service.plan(config_path)
+    if p.path is not None:
+        typer.echo(f"{'Would write' if dry_run else 'Writing'} {p.path}")
+        if dry_run:
+            typer.echo(p.content)
+        else:
+            service.write_service_file(p)
+    _run_commands(p.activate, dry_run)
+    typer.echo("Note: restarting the service forgets every device (state is in memory); they must pair again.")
+
+
+@service_cli.command("uninstall")
+def service_uninstall(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
+    """Stop and remove the per-user service."""
+    from . import service
+
+    p = service.plan(None)
+    _run_commands(p.deactivate, dry_run)
+    if p.path is not None and p.path.exists() and not dry_run:
+        p.path.unlink()
+        typer.echo(f"Removed {p.path}")
+    if p.path is not None and p.path.suffix == ".service":
+        _run_commands([["systemctl", "--user", "daemon-reload"]], dry_run)
 
 
 # ----- audit / doctor ------------------------------------------------------------------
