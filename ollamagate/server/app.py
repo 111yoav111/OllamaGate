@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -25,7 +27,16 @@ from . import auth, pairing
 from .body import BodyTooLarge, read_body_limited
 from .netutil import parse_networks, resolve_client_ip
 from .pairing_routes import register_pairing_routes
-from .policy import EndpointKind, classify_endpoint
+from .policy import (
+    ACCOUNTED_ENDPOINTS,
+    EndpointKind,
+    apply_body_policy,
+    classify_endpoint,
+    filter_model_list,
+    model_allowed,
+)
+from .queue import PriorityGate
+from .usage import UsageCounter
 from .proxy import (
     ClientGone,
     ProxyStreamResponse,
@@ -44,6 +55,34 @@ SWEEP_INTERVAL = 1.0
 
 def error(status: int, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status, headers=headers)
+
+
+MAX_LISTING_BYTES = 2 * 1024 * 1024
+
+
+def seconds_until_midnight() -> int:
+    now = datetime.datetime.now()
+    tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow - now).total_seconds())
+
+
+def seconds_until_next_month() -> int:
+    now = datetime.datetime.now()
+    first = (now.replace(day=28) + datetime.timedelta(days=4)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int((first - now).total_seconds())
+
+
+async def read_capped(response: httpx.Response, limit: int) -> bytes:
+    data = bytearray()
+    async for chunk in response.aiter_raw():
+        data += chunk
+        if len(data) > limit:
+            raise httpx.ReadError("upstream listing too large")
+    return bytes(data)
+
+
+def forbidden() -> JSONResponse:
+    return error(403, "forbidden")
 
 
 def lockdown_response() -> JSONResponse:
@@ -65,6 +104,25 @@ def requested_model(body: bytes) -> str:
 def unauthorized() -> JSONResponse:
     # Deliberately generic: no hint about why, no server/version info.
     return error(401, "unauthorized", {"WWW-Authenticate": "Bearer"})
+
+
+class BanMiddleware:
+    """Refuse every request from a banned client before any routing happens."""
+
+    def __init__(self, app: ASGIApp, state: State, trusted: Any, network_mode: str) -> None:
+        self.app = app
+        self.state = state
+        self.trusted = trusted
+        self.network_mode = network_mode
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            peer = scope.get("client")
+            ip = resolve_client_ip(peer[0] if peer else None, Headers(scope=scope), self.trusted, self.network_mode)
+            if self.state.bans.banned(ip) is not None:
+                await forbidden()(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class SecurityHeadersMiddleware:
@@ -107,6 +165,8 @@ def create_app(
     upstream_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     trusted = parse_networks(config.network.trusted_proxies)
+    b = config.bans
+    state.bans.configure(b.failures, b.window_seconds, b.ban_seconds, b.max_ban_seconds)
 
     async def housekeeping() -> None:
         while True:
@@ -166,6 +226,13 @@ def create_app(
         peer = request.client.host if request.client else None
         return resolve_client_ip(peer, request.headers, trusted, config.network.mode)
 
+    def record_failure(ip: str | None, reason: str) -> None:
+        """Count a failed login/pairing attempt; ban the client if it keeps failing."""
+        ban = state.bans.record_failure(ip, reason)
+        if ban is not None:
+            state.audit("ban_auto", ip=ip, reason=reason, strikes=ban.strikes, until=ban.until)
+            log.warning("banned %s (%s, strike %d)", ban.key, reason, ban.strikes)
+
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
         if state.lockdown:  # don't even confirm the host is alive
@@ -199,14 +266,21 @@ def create_app(
             }
         )
 
-    register_pairing_routes(app, config, state, fingerprint, client_ip)
+    register_pairing_routes(app, config, state, fingerprint, client_ip, record_failure)
+
+    gate = PriorityGate(config.server.max_upstream_concurrency)
+    app.state.priority_gate = gate
+
+    def reject_limit(device_id: str, ip: str | None, what: str, message: str, retry_after: int) -> Response:
+        state.audit_noisy("limit_" + what, ip=ip, device_id=device_id)
+        return error(429, message, {"Retry-After": str(max(1, retry_after))})
 
     async def proxy(request: Request) -> Response:
         ip = client_ip(request)
         method, path = request.method, request.url.path
         token = auth.extract_bearer(request.headers)
 
-        # 1. Lockdown rejects everything before auth. (Phase 4: IP bans go here too.)
+        # 1. Lockdown rejects everything before auth (banned IPs never get here).
         if state.lockdown:
             return lockdown_response()
 
@@ -221,11 +295,14 @@ def create_app(
                 path=path,
                 user_agent=request.headers.get("user-agent", ""),
             )
+            if outcome.result in (auth.AuthResult.INVALID, auth.AuthResult.MISSING):
+                record_failure(ip, "failed logins")
             if outcome.result is auth.AuthResult.SUSPENDED:
                 return error(403, "device suspended")
             return unauthorized()
         device = outcome.device
         assert device is not None
+        limits = device.limits
 
         # 3. Is this an endpoint we forward at all, and may this device use it?
         kind = classify_endpoint(method, path)
@@ -234,16 +311,40 @@ def create_app(
         if kind is EndpointKind.MANAGEMENT and not device.allow_model_management:
             state.audit("endpoint_denied", ip=ip, device_id=device.id, path=path, method=method)
             return error(403, "endpoint not allowed for this device")
+        if path.startswith("/v1/models/") and not model_allowed(limits, path.removeprefix("/v1/models/")):
+            return error(404, "not found")
 
-        # 4. Concurrency cap, checked and claimed atomically (no await in between).
-        if len(state.device_streams(device.id)) >= config.limits.max_concurrent:
-            state.audit("limit_concurrency", ip=ip, device_id=device.id)
-            return error(429, "too many concurrent requests", {"Retry-After": "1"})
+        # 4. Rate, quota and concurrency limits - checked and claimed with no await in between.
+        if limits.requests_per_minute > 0 and not state.device_rpm.hit(device.id, limit=limits.requests_per_minute):
+            return reject_limit(
+                device.id, ip, "rate", "rate limit exceeded", state.device_rpm.retry_after(device.id)
+            )
+        today, month = state.usage_today(device.id), state.usage_month(device.id)
+        if limits.tokens_per_day and today.prompt_tokens + today.completion_tokens >= limits.tokens_per_day:
+            return reject_limit(device.id, ip, "tokens_day", "daily token quota used up", seconds_until_midnight())
+        if limits.tokens_per_month and month.prompt_tokens + month.completion_tokens >= limits.tokens_per_month:
+            return reject_limit(
+                device.id, ip, "tokens_month", "monthly token quota used up", seconds_until_next_month()
+            )
+        if len(state.device_streams(device.id)) >= limits.max_concurrent:
+            return reject_limit(device.id, ip, "concurrency", "too many concurrent requests", 1)
         started = time.monotonic()
         stream = state.register_stream(device.id, method, path, auth.hash_token(token or ""))
+        holding_slot = False
+        counter: UsageCounter | None = None
+        body = b""
 
         def finish(outcome_name: str, status: int, bytes_out: int) -> None:
+            nonlocal holding_slot
+            if holding_slot:
+                holding_slot = False
+                gate.release()
             state.unregister_stream(stream)
+            if counter is not None and status < 400 and path in ACCOUNTED_ENDPOINTS:
+                used = counter.result()
+                state.add_usage(device.id, prompt_tokens=used.prompt_tokens, completion_tokens=used.completion_tokens)
+                if not used.exact:
+                    state.audit("usage_estimated", ip=ip, device_id=device.id, tokens=used.total, outcome=outcome_name)
             state.log_request(
                 RequestLogEntry(
                     ts=time.time(),
@@ -285,8 +386,16 @@ def create_app(
                 finish("rejected", 401, 0)
                 return unauthorized()
 
-            stream.model = requested_model(body)
-            # (Phase 4) body policy: model allowlist, num_ctx/num_predict clamps, usage injection.
+            # 7. Body policy: model allowlist, num_ctx/num_predict/max_tokens clamps,
+            #    keep_alive cap, and a usage chunk requested for /v1 streams.
+            policy = apply_body_policy(limits, path, body)
+            stream.model = safe_text(policy.model, 100) if policy.model else requested_model(body)
+            if policy.error is not None:
+                if policy.status == 403:
+                    state.audit_noisy("model_denied", ip=ip, device_id=device.id, model=policy.model)
+                finish("rejected", policy.status, 0)
+                return error(policy.status, policy.error)
+            body = policy.body
 
             is_new_ip = state.touch_device(
                 device,
@@ -297,7 +406,11 @@ def create_app(
             if is_new_ip:
                 state.audit("device_new_ip", ip=ip, device_id=device.id)
 
-            # 7. Forward.
+            # 8. Wait for a slot at Ollama (higher priority first).
+            await race_kill(gate.acquire(limits.priority), stream, request.receive)
+            holding_slot = True
+
+            # 9. Forward.
             http: httpx.AsyncClient = request.app.state.http
             upstream_request = http.build_request(
                 method, path, content=body or None, headers=build_upstream_headers(request.headers)
@@ -308,8 +421,21 @@ def create_app(
                 log.warning("upstream unavailable: %s", type(exc).__name__)
                 finish("upstream_error", 502, 0)
                 return error(502, "upstream unavailable")
+
+            if limits.allowed_models and method == "GET" and path in ("/api/tags", "/v1/models"):
+                # Small JSON listings: buffer them to hide models this device may not use.
+                try:
+                    raw = await race_kill(read_capped(upstream, MAX_LISTING_BYTES), stream, request.receive)
+                finally:
+                    await upstream.aclose()
+                content = filter_model_list(limits, path, raw)
+                finish("complete", upstream.status_code, len(content))
+                return Response(content, status_code=upstream.status_code, media_type="application/json")
+
+            counter = UsageCounter(upstream.headers.get("content-type", ""), len(body))
+            stream.usage = counter
             handed_off = True
-            return ProxyStreamResponse(upstream, stream, finish)
+            return ProxyStreamResponse(upstream, stream, finish, on_chunk=counter.feed)
         except StreamKilled as exc:
             finish("killed", 503, 0)
             return error(503, f"request terminated: {exc.reason}")
@@ -324,5 +450,6 @@ def create_app(
     app.add_api_route("/api/{rest:path}", proxy, methods=PROXY_METHODS, include_in_schema=False)
     app.add_api_route("/v1/{rest:path}", proxy, methods=PROXY_METHODS, include_in_schema=False)
 
+    app.add_middleware(BanMiddleware, state=state, trusted=trusted, network_mode=config.network.mode)
     app.add_middleware(SecurityHeadersMiddleware, hsts=config.tls.mode != "off")
     return app
