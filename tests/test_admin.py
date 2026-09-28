@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import sys
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -40,7 +41,8 @@ def test_control_files_are_private(admin_gate):
         assert info_path.stat().st_mode & 0o077 == 0
         assert ipc.run_dir(cfg_dir).stat().st_mode & 0o077 == 0
         assert info["transport"] == "unix"
-        assert (ipc.run_dir(cfg_dir) / "admin.sock").stat().st_mode & 0o077 == 0
+        # The socket may live in a short temp dir when the config path is long (macOS).
+        assert Path(info["path"]).stat().st_mode & 0o077 == 0
 
 
 def test_wrong_secret_rejected(admin_gate):
