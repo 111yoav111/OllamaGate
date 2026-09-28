@@ -6,7 +6,8 @@ ends as soon as any of these happens:
 
 * Ollama finishes the response,
 * the client disconnects (the upstream request is closed, so Ollama stops), or
-* the stream is killed (revoke / kick / lockdown) - within one event-loop tick.
+* the stream is killed (revoke / kick / lockdown) - within one event-loop tick,
+  even if the client has stopped reading.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
 import httpx
 from starlette.responses import Response
@@ -25,11 +26,15 @@ from ..state import ActiveStream
 
 log = logging.getLogger("ollamagate.proxy")
 
+T = TypeVar("T")
+
 # Only these request headers are forwarded. Everything else - notably
 # Authorization, Cookie, X-Forwarded-*, hop-by-hop headers - is dropped.
 FORWARD_REQUEST_HEADERS = ("content-type", "accept")
 # Only these response headers are passed back to the client.
 FORWARD_RESPONSE_HEADERS = ("content-type",)
+# How long we try to deliver an in-band error before giving up on a client.
+TRAILER_TIMEOUT = 1.0
 
 
 class StreamKilled(Exception):
@@ -57,37 +62,56 @@ async def wait_for_disconnect(receive: Receive) -> None:
             return
 
 
+async def _reap(task: asyncio.Future[Any]) -> None:
+    """Await a task we just cancelled, closing any response it still produced."""
+    try:
+        result = await task
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise  # we are being cancelled ourselves; don't swallow it
+    except Exception:  # noqa: BLE001 - the task's own failure is irrelevant now
+        pass
+    else:
+        if isinstance(result, httpx.Response):
+            await result.aclose()
+
+
+async def race_kill(
+    work: Awaitable[T], stream: ActiveStream, receive: Receive | None = None
+) -> T:
+    """Run ``work`` but abort it if the stream is killed or (optionally) the client leaves."""
+    work_task = asyncio.ensure_future(work)
+    watchers = [asyncio.ensure_future(stream.killed.wait())]
+    if receive is not None:
+        watchers.append(asyncio.ensure_future(wait_for_disconnect(receive)))
+    try:
+        await asyncio.wait({work_task, *watchers}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        work_task.cancel()
+        await _reap(work_task)
+        raise
+    finally:
+        for w in watchers:
+            w.cancel()
+    if work_task.done():
+        return work_task.result()
+    work_task.cancel()
+    await _reap(work_task)
+    if stream.killed.is_set():
+        raise StreamKilled(stream.kill_reason)
+    raise ClientGone()
+
+
 async def open_upstream(
-    client: httpx.AsyncClient,
-    request: httpx.Request,
-    stream: ActiveStream,
-    receive: Receive,
+    client: httpx.AsyncClient, request: httpx.Request, stream: ActiveStream, receive: Receive
 ) -> httpx.Response:
-    """Send ``request`` upstream, aborting early if the stream is killed or the client leaves.
+    """Send ``request`` upstream, aborting if the stream is killed or the client leaves.
 
     Model loading can take a long time before the first byte arrives, so we
     must not wait blindly here.
     """
-    send_task = asyncio.ensure_future(client.send(request, stream=True))
-    kill_task = asyncio.ensure_future(stream.killed.wait())
-    gone_task = asyncio.ensure_future(wait_for_disconnect(receive))
-    try:
-        await asyncio.wait({send_task, kill_task, gone_task}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        for task in (kill_task, gone_task):
-            task.cancel()
-    if send_task.done():
-        return send_task.result()
-    send_task.cancel()
-    try:
-        response = await send_task
-    except (asyncio.CancelledError, httpx.HTTPError):
-        pass
-    else:  # the response raced in just as we cancelled
-        await response.aclose()
-    if stream.killed.is_set():
-        raise StreamKilled(stream.kill_reason)
-    raise ClientGone()
+    return await race_kill(client.send(request, stream=True), stream, receive)
 
 
 def _error_trailer(content_type: str, message: str) -> bytes:
@@ -110,7 +134,7 @@ class ProxyStreamResponse(Response):
         self,
         upstream: httpx.Response,
         stream: ActiveStream,
-        on_done: Callable[[str, int, int], Awaitable[None] | None],
+        on_done: Callable[[str, int, int], None],
         on_chunk: Callable[[bytes], None] | None = None,
     ) -> None:
         self.upstream = upstream
@@ -131,7 +155,7 @@ class ProxyStreamResponse(Response):
         return headers
 
     async def _pump(self, send: Send) -> str:
-        outcome = "complete"
+        """Copy the body. Returns "complete" or "upstream_error"."""
         try:
             async for chunk in self.upstream.aiter_raw():
                 if not chunk:
@@ -142,12 +166,31 @@ class ProxyStreamResponse(Response):
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
         except httpx.HTTPError as exc:
             log.warning("upstream stream error: %s", type(exc).__name__)
-            outcome = "upstream_error"
-            trailer = _error_trailer(self.content_type, "upstream error")
-            if trailer:
-                await send({"type": "http.response.body", "body": trailer, "more_body": True})
+            await self._end_with_error("upstream error", send)
+            return "upstream_error"
         await send({"type": "http.response.body", "body": b"", "more_body": False})
-        return outcome
+        return "complete"
+
+    async def _end_with_error(self, message: str, send: Send) -> None:
+        """Tell a streaming client why the stream ended, then end it.
+
+        Bodies that are not line-delimited streams get no terminator at all, so
+        the connection is aborted and the client sees a truncated response
+        rather than a clean-looking but incomplete one. A client that has stopped
+        reading gets TRAILER_TIMEOUT seconds before we give up on it.
+        """
+        trailer = _error_trailer(self.content_type, message)
+        if not trailer:
+            return
+
+        async def deliver() -> None:
+            await send({"type": "http.response.body", "body": trailer, "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+        try:
+            await asyncio.wait_for(deliver(), TRAILER_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            pass
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         outcome = "client_disconnect"
@@ -164,24 +207,24 @@ class ProxyStreamResponse(Response):
                 for task in (pump, gone, kill):
                     task.cancel()
                 await asyncio.gather(pump, gone, kill, return_exceptions=True)
-            if pump.done() and not pump.cancelled() and pump.exception() is None:
-                outcome = pump.result()
+
+            if pump.done() and not pump.cancelled():
+                exc = pump.exception()
+                if exc is None:
+                    outcome = pump.result()
+                else:
+                    log.error("stream pump failed: %r", exc)
+                    outcome = "error"
             elif kill.done() and not kill.cancelled():
                 outcome = "killed"
-                trailer = _error_trailer(self.content_type, f"stream terminated: {self.stream.kill_reason}")
-                try:
-                    if trailer:
-                        await send({"type": "http.response.body", "body": trailer, "more_body": True})
-                    await send({"type": "http.response.body", "body": b"", "more_body": False})
-                except OSError:
-                    pass
-            elif pump.done() and not pump.cancelled() and isinstance(pump.exception(), OSError):
-                outcome = "client_disconnect"
+                # Stop Ollama first, then (best effort) tell the client why.
+                await self.upstream.aclose()
+                await self._end_with_error(f"stream terminated: {self.stream.kill_reason}", send)
         finally:
-            await self.upstream.aclose()
-            result = self.on_done(outcome, self.status_code, self.bytes_out)
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                await self.upstream.aclose()
+            finally:
+                self.on_done(outcome, self.status_code, self.bytes_out)
 
 
 def monotonic_ms(start: float) -> int:
