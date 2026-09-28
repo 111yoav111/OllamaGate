@@ -11,7 +11,10 @@ from ollamagate.admin.service import Admin
 from ollamagate.config import Config
 from ollamagate.server import auth, pairing
 from ollamagate.state import DeviceStatus, State
+from textual.widgets import TabbedContent
+
 from ollamagate.tui.app import GateTUI
+from ollamagate.tui.widgets import ConfirmScreen
 
 SHOTS = os.environ.get("OLLAMAGATE_TUI_SHOTS")  # set to a directory to save SVG screenshots
 
@@ -125,17 +128,17 @@ async def test_rename_suspend_rotate():
         await pilot.press("enter")
         await pilot.pause()
         assert admin.state.get_device(device_id).name == "Work laptop"
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await pilot.pause()
         assert admin.state.get_device(device_id).status is DeviceStatus.SUSPENDED
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await pilot.pause()
         assert admin.state.get_device(device_id).status is DeviceStatus.ACTIVE
         old_hash = admin.state.get_device(device_id).token_hash
         await pilot.press("t", "y")
         await pilot.pause()
         assert admin.state.get_device(device_id).token_hash != old_hash
-        assert "og_dev_" in plain(app.screen, "Static.selectable") if hasattr(app.screen, "query_one") else True
+        assert "og_dev_" in plain(app.screen, "Static.selectable")
         await shot(app, "rotated")
 
 
@@ -152,10 +155,10 @@ async def test_detail_screen_and_limits():
         assert device_id in text and "203.0.113.7" in text and "iPhone" in text
         await shot(app, "detail")
         await pilot.pause(1.3)  # timers keep running while the detail screen is on top
-        await pilot.press("s")  # actions work from the detail screen
+        await pilot.press("s", "y")  # actions work from the detail screen
         await pilot.pause()
         assert admin.state.get_device(device_id).status is DeviceStatus.SUSPENDED
-        await pilot.press("s")
+        await pilot.press("s", "y")
         await pilot.pause()
         await pilot.press("l")
         await pilot.pause()
@@ -276,3 +279,111 @@ async def test_live_update_on_new_device(n):
             add_device(admin.state, f"dev{i}")
         await pilot.pause(0.7)
         assert app.query_one("#device-table").row_count == n
+
+
+# ----- Phase 3 council regressions -------------------------------------------------------
+
+
+async def test_markup_in_device_name_cannot_crash_toasts():
+    """A device named "[/x]" used to raise MarkupError in notify() and kill the server."""
+    admin = make_admin()
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45), notifications=True) as pilot:
+        s = admin.open_pairing()
+        pairing.claim(admin.state, secret=s["code"], kind="code", device_name="[/x] [b]x", ip="1.2.3.4", user_agent="")
+        await pilot.pause(1.3)
+        assert app.is_running
+        assert any("[/x]" in n.message for n in app._notifications)
+
+
+async def test_toasts_keep_working_when_audit_log_is_full():
+    admin = Admin(State(audit_size=20), Config(), None)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45), notifications=True) as pilot:
+        for i in range(50):
+            admin.state.audit("auth_failed", ip=f"203.0.113.{i}")
+        await pilot.pause(1.2)
+        device_id = add_device(admin.state, "late")
+        admin.state.audit("pairing_succeeded", device_id=device_id)
+        await pilot.pause(1.3)
+        assert any("late" in n.message for n in app._notifications)
+
+
+async def test_ctrl_q_asks_first():
+    admin = make_admin()
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert app.is_running and isinstance(app.screen, ConfirmScreen)
+        await pilot.press("n")
+
+
+async def test_pair_from_detail_screen_shows_pairing_tab():
+    admin = make_admin()
+    add_device(admin.state)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("2", "enter")
+        await pilot.pause()
+        await pilot.press("p")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        assert app._q(TabbedContent).active == "pairing"
+
+
+async def test_ctrl_l_does_not_stack_dialogs():
+    admin = make_admin()
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("ctrl+l", "ctrl+l")
+        await pilot.pause()
+        assert len(app.screen_stack) == 2
+
+
+async def test_audit_cursor_stays_on_entry():
+    admin = make_admin()
+    for i in range(10):
+        admin.state.audit("admin_test", n=i)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("4")
+        table = app._q("#audit-table")
+        table.move_cursor(row=5)
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        admin.state.audit("admin_test", n=99)
+        await pilot.pause(1.3)
+        assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == key
+
+
+async def test_device_rows_update_in_place():
+    admin = make_admin()
+    device_id = add_device(admin.state)
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("2")
+        admin.state.add_usage(device_id, requests=7)
+        admin.state._changed()
+        await pilot.pause(1.3)
+        assert app._q("#device-table").get_row_at(0)[8].plain == "7"
+
+
+async def test_settings_tab_reflects_cli_changes():
+    admin = make_admin()
+    app = GateTUI(admin)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("5")
+        admin.set_setting("pairing.max_attempts", 3)  # e.g. via `ollamagate settings set`
+        await pilot.pause(1.3)
+        assert app._q("#set-pairing-max_attempts").value == "3"
+
+
+async def test_unexpected_error_in_action_does_not_kill_tui(monkeypatch):
+    admin = make_admin()
+    add_device(admin.state)
+    app = GateTUI(admin)
+    monkeypatch.setattr(admin, "kick", lambda ref: 1 / 0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.press("2", "k", "y")
+        await pilot.pause()
+        assert app.is_running
