@@ -66,7 +66,7 @@ def test_link_pairing(gate, client):
 
 
 def test_wrong_code_then_lockout(gate, client):
-    s = open_window(gate, max_attempts=3)
+    s = open_window(gate, max_attempts=3, methods=("code",))
     for left in (2, 1, 0):
         r = client.post(gate.url + "/pair/claim", json={"code": "ZZZZ-ZZZZ", "device_name": "x"})
         assert r.status_code == 403 and r.json()["attempts_left"] == left

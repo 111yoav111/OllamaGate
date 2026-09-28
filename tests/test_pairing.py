@@ -94,9 +94,9 @@ def test_window_is_single_use():
     assert claim(state, s.code).error is pairing.ClaimError.CLOSED  # replay
 
 
-def test_wrong_attempts_destroy_window():
+def test_wrong_codes_destroy_code_only_window():
     state = State()
-    s = open_window(state, max_attempts=5)
+    s = open_window(state, max_attempts=5, methods=("code",))
     for i in range(4):
         r = claim(state, "ZZZZZZZZ")
         assert r.error is pairing.ClaimError.INVALID and r.attempts_left == 4 - i
@@ -105,6 +105,27 @@ def test_wrong_attempts_destroy_window():
     assert claim(state, s.code).error is pairing.ClaimError.CLOSED
     assert state.pairing_history[-1].state is WindowState.DESTROYED
     assert state.list_devices() == []
+
+
+def test_wrong_codes_disable_code_but_keep_link():
+    """Garbage guesses must not let an attacker kill an unguessable QR/link."""
+    state = State()
+    s = open_window(state, max_attempts=3)
+    for _ in range(3):
+        claim(state, "ZZZZZZZZ")
+    assert claim(state, s.code).error is pairing.ClaimError.INVALID  # code disabled
+    secret = s.link_url.split("#t=")[1].split("&")[0]
+    assert claim(state, secret, kind="link").error is None
+
+
+def test_wrong_link_secrets_have_own_budget():
+    state = State()
+    s = open_window(state, max_attempts=2)
+    for _ in range(2 * pairing.LINK_ATTEMPT_FACTOR):
+        assert claim(state, "wrong", kind="link").error is pairing.ClaimError.INVALID
+    # Link/QR are now disabled but the code still works.
+    assert state.pairing_window is not None
+    assert claim(state, s.code).error is None
 
 
 def test_code_cannot_be_used_as_link_secret_and_vice_versa():
