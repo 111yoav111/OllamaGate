@@ -12,7 +12,7 @@ someone who knows the address, scans for Ollama, or sniffs the network.
 **Assets:** the models and GPU time, the prompts/responses of paired devices,
 and the host machine itself.
 
-## What's protected (Phases 1-2)
+## What's protected (Phases 1-3)
 
 - **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
   owner has a pairing window open) requires a device token.
@@ -83,6 +83,19 @@ and the host machine itself.
   symlinks). A second instance using the same config directory is refused.
   There is no remote admin API. Admin actions are audited. Device views never
   include token hashes.
+- **Admin TUI.** Runs inside the server process and acts only through the same
+  audited admin service as the CLI; it has no network surface. Client-supplied
+  text (device names, user agents, paths, model names) is rendered as literal
+  text, never as Rich/Textual markup, with control characters escaped. Logs go
+  to an in-memory buffer shown on the dashboard, never to the terminal under
+  the TUI. Revoke, rotate, lockdown and quit ask for confirmation, and the
+  default button is "No".
+- **Lockdown** (`Ctrl+L` / `ollamagate lockdown on`) rejects every proxied
+  request before authentication, cuts all streams and refuses pairing while
+  keeping all devices.
+- **Runtime settings** are limited to a small allowlist (public URL, pairing
+  TTL/attempts, default concurrency, default model-management grant), are
+  validated like the config file, audited, and never written to disk.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
