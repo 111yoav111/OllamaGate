@@ -31,8 +31,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .errors import AdminError
-
 log = logging.getLogger("ollamagate.admin")
 
 MAX_MESSAGE = 64 * 1024
@@ -42,6 +40,10 @@ MAX_UNIX_PATH = 100
 Handler = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 __all__ = ["AdminError", "NotRunning", "ControlClient", "start_control_server", "run_dir"]
+
+
+class AdminError(Exception):
+    """An error meant to be shown to the admin (bad device id, etc.)."""
 
 
 class NotRunning(Exception):

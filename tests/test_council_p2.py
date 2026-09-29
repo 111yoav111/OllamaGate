@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from ollamagate.__main__ import cli
 from ollamagate.admin import ipc
-from ollamagate.admin.errors import AdminError
+from ollamagate.admin.ipc import AdminError
 from ollamagate.admin.service import Admin
 from ollamagate.config import Config
 from ollamagate.ratelimit import client_key

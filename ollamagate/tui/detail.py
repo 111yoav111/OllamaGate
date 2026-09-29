@@ -13,7 +13,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static, Switch
 
-from ..admin.errors import AdminError
+from ..admin.ipc import AdminError
 from .widgets import ACTIVITY_DOT, InputScreen, ago, t, ts
 
 

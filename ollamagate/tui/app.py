@@ -27,7 +27,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, TabbedContent, TabPane
 
 from .. import qr
-from ..admin.errors import AdminError
+from ..admin.ipc import AdminError
 from ..config import is_loopback_host
 from ..admin.service import RUNTIME_SETTINGS, Admin
 from ..ollama_status import OllamaStatus, human_bytes, probe

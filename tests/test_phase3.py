@@ -66,7 +66,7 @@ def test_settings_type_checks():
     admin = Admin(State(), Config(), None)
     import pytest
 
-    from ollamagate.admin.errors import AdminError
+    from ollamagate.admin.ipc import AdminError
 
     for key, value in [("pairing.ttl_seconds", True), ("pairing.ttl_seconds", "abc"), ("limits.allow_model_management", "maybe")]:
         with pytest.raises(AdminError):
@@ -138,7 +138,7 @@ def test_public_url_validation():
         with pytest.raises(ConfigError):
             validate_public_url(bad)
     admin = Admin(State(), Config(), None)
-    from ollamagate.admin.errors import AdminError
+    from ollamagate.admin.ipc import AdminError
 
     with pytest.raises(AdminError):
         admin.set_setting("server.public_url", "javascript:alert(1)")

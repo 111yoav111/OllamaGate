@@ -18,7 +18,7 @@ from ..config import Config, ConfigError, is_loopback_host
 from ..server import auth, pairing
 from ..state import PRIORITIES, Device, DeviceLimits, DeviceStatus, State, WindowState
 from ..uaparse import summarize as summarize_ua
-from .errors import AdminError
+from .ipc import AdminError
 
 # "Seen recently" threshold for the yellow status dot.
 RECENT_SECONDS = 300
