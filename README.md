@@ -4,11 +4,6 @@ A secure pairing proxy that lets your own devices use the Ollama models on your
 home PC over the internet. Knowing the server's address gives no access: a device
 has to **pair** first (code, QR or link), then it gets its own revocable token.
 
-> **Status:** all five build phases are done: TLS and a hardened streaming
-> passthrough, pairing by code / QR / link, a live admin TUI plus CLI,
-> per-device quotas and limits, auto-bans, a built-in browser chat, and
-> Tailscale / Cloudflare / Let's Encrypt modes, notifications and service
-> install.
 
 ## Requirements
 
@@ -235,14 +230,3 @@ Everything else returns `404`. Model management (`pull`, `push`, `delete`,
 .venv/bin/python -m pytest -q
 ```
 
-## Roadmap
-
-1. ~~Foundation~~
-2. ~~Pairing (code / QR / link) and device management CLI~~
-3. ~~Admin TUI~~
-4. ~~Quotas, rate limits, auto-bans, lockdown, browser chat~~
-5. ~~Tailscale / Cloudflare / Let's Encrypt modes, doctor, notifications, service install, packaging~~
-
-Possible next steps (need new dependencies, so not done without your OK):
-offline GeoIP lookup (MaxMind GeoLite2), TOTP for sensitive admin commands.
-(mTLS client certificates are done: `[tls] client_certs = true`.)
