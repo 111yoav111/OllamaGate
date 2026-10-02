@@ -60,3 +60,21 @@ def test_server_context_enforces_tls12_minimum(tmp_path):
         assert r.status_code == 200
     finally:
         server.stop()
+
+
+def test_self_signed_cert_covers_public_url_host(tmp_path):
+    from cryptography import x509
+
+    from ollamagate.config import Config
+    from ollamagate.server.runner import prepare_tls
+
+    cfg = Config()
+    cfg.config_dir = tmp_path
+    cfg.server.host = "0.0.0.0"
+    cfg.server.public_url = "https://home.example.net:8443"
+    info = prepare_tls(cfg)
+    san = x509.load_pem_x509_certificate(info.cert_path.read_bytes()).extensions.get_extension_for_class(
+        x509.SubjectAlternativeName
+    ).value
+    assert "home.example.net" in san.get_values_for_type(x509.DNSName)
+    assert "0.0.0.0" not in [str(ip) for ip in san.get_values_for_type(x509.IPAddress)]

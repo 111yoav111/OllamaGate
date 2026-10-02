@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI
@@ -43,7 +44,9 @@ def prepare_tls(config: Config) -> TLSInfo | None:
     if config.tls.mode == "files":
         cert, key = Path(config.tls.cert_file), Path(config.tls.key_file)
     else:
-        sans = tls.default_sans(config.server.host, config.tls.extra_sans)
+        # The public_url host too, so clients that trust cert.pem (not just the pin) accept it.
+        public_host = urlsplit(config.base_url).hostname or ""
+        sans = tls.default_sans(config.server.host, [*config.tls.extra_sans, public_host])
         cert, key = tls.ensure_self_signed(config.config_dir / "tls", sans)
     return TLSInfo(cert, key, tls.cert_fingerprint(cert))
 

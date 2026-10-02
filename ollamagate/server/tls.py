@@ -93,7 +93,7 @@ def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> No
 
 def default_sans(host: str, extra: list[str]) -> list[str]:
     names = ["localhost", "127.0.0.1", "::1", socket.gethostname(), host, *extra]
-    return [n for n in names if n]
+    return list(dict.fromkeys(n for n in names if n and n not in ("0.0.0.0", "::")))
 
 
 def _needs_renewal(cert_path: Path, sans: list[str]) -> bool:
