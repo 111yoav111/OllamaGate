@@ -80,13 +80,36 @@ def test_malformed_bodies_rejected(raw):
 
 def test_non_model_endpoints_untouched():
     raw = b'{"anything": 1}'
-    assert apply_body_policy(LIM, "/api/pull", raw).body is raw
+    assert apply_body_policy(LIM, "/api/delete", raw).body is raw
 
 
-def test_unchanged_bodies_are_not_reserialized():
-    lim = DeviceLimits(max_num_ctx=0, max_num_predict=0)
-    raw = body(model="m", messages=[])
-    assert apply_body_policy(lim, "/api/embed", raw).body is raw
+@pytest.mark.parametrize("path, raw", [
+    # Go merges a repeated object into the first; Python keeps only the last.
+    ("/api/embed", b'{"model":"m","options":{"num_ctx":262144},"options":{}}'),
+    ("/api/chat", b'{"model":"m","options":{"num_ctx":262144},"options":{"num_predict":100}}'),
+])
+def test_duplicate_keys_cannot_hide_values(path, raw):
+    forwarded = apply_body_policy(LIM, path, raw).body
+    assert b"262144" not in forwarded and forwarded.count(b'"options"') == 1
+
+
+@pytest.mark.parametrize("raw", [b'{"model":"m","options":{"num_predict":NaN}}', b'{"model":"m","max_tokens":Infinity}'])
+def test_nan_and_infinity_are_rejected(raw):
+    assert apply_body_policy(LIM, "/api/chat", raw).error == "request body must be JSON"
+    assert json.loads(apply_body_policy(LIM, "/api/chat", body(model="m", keep_alive="nan")).body)["keep_alive"] == "30m"
+
+
+def test_registry_endpoints_refuse_insecure():
+    assert apply_body_policy(LIM, "/api/pull", body(model="10.0.0.1:80/a/b", insecure=True)).status == 403
+    assert apply_body_policy(LIM, "/api/pull", body(model="m", INSECURE=True)).error  # case-folded smuggling
+    assert apply_body_policy(LIM, "/api/push", body(model="m")).error is None
+
+
+def test_show_accepts_name_like_ollama():
+    lim = DeviceLimits(allowed_models=["ok"])
+    assert apply_body_policy(lim, "/api/show", body(name="ok")).error is None
+    assert apply_body_policy(lim, "/api/show", body(name="secret")).status == 403
+    assert apply_body_policy(lim, "/api/show", body(model="secret", name="ok")).status == 403  # model wins in Ollama
 
 
 def test_filter_model_list():
@@ -310,7 +333,7 @@ def test_embeddings_num_ctx_clamped_only_when_given():
     r = apply_body_policy(lim, "/api/embed", body(model="m", input="x", options={"num_ctx": 131072}))
     assert json.loads(r.body)["options"] == {"num_ctx": 1024}
     raw = body(model="m", input="x")
-    assert apply_body_policy(lim, "/api/embed", raw).body is raw  # untouched: Ollama's default applies
+    assert "options" not in json.loads(apply_body_policy(lim, "/api/embed", raw).body)  # Ollama's default applies
 
 
 # ----- response scrubbing ----------------------------------------------------------------

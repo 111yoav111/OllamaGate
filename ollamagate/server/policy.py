@@ -135,20 +135,48 @@ def _keys_are_plain(obj: dict) -> bool:
     return all(_PLAIN_KEY.match(k) for k in obj)
 
 
+def _reject_constant(name: str) -> None:
+    raise ValueError(f"{name} is not valid JSON")  # NaN / Infinity: Python accepts them, Go doesn't
+
+
+def _loads(body: bytes) -> object:
+    return json.loads(body, parse_constant=_reject_constant) if body else None
+
+
+# Pull/push take {"insecure": true}, which lets Ollama fetch over plain HTTP
+# from any host - a way for a device to make it talk to the owner's LAN.
+_REGISTRY_ENDPOINTS = {"/api/pull", "/api/push"}
+
+
+def _registry_policy(body: bytes) -> PolicyResult:
+    try:
+        data = _loads(body)
+    except (ValueError, RecursionError):
+        return PolicyResult(body, error="request body must be JSON")
+    if not isinstance(data, dict) or not _keys_are_plain(data):
+        return PolicyResult(body, error="request keys must be lowercase field names")
+    if data.get("insecure"):
+        return PolicyResult(body, error="insecure registries are not allowed", status=403)
+    return PolicyResult(json.dumps(data).encode())
+
+
 def apply_body_policy(
     limits: DeviceLimits, path: str, body: bytes, remaining_tokens: int | None = None
 ) -> PolicyResult:
     """Validate and rewrite a request body according to the device's limits.
 
-    Only JSON bodies of model endpoints are touched; the rewritten body is
-    re-serialised only when something changed. ``remaining_tokens`` (when a
+    Only JSON bodies of model endpoints are touched. The body is always
+    re-serialised from what was checked, so duplicate keys (Python keeps the
+    last, Go merges objects) can't hide a value from us. ``remaining_tokens`` (when a
     quota applies) further caps the output length so one request can't
     overshoot the quota by much.
     """
+    if path in _REGISTRY_ENDPOINTS:
+        return _registry_policy(body)
     if path not in _MODEL_ENDPOINTS:
         return PolicyResult(body)
     try:
-        data = json.loads(body) if body else None
+        data = _loads(body)
     except (ValueError, RecursionError):
         return PolicyResult(body, error="request body must be JSON")
     if not isinstance(data, dict):
@@ -157,6 +185,8 @@ def apply_body_policy(
         if isinstance(obj, dict) and not _keys_are_plain(obj):
             return PolicyResult(body, error="request keys must be lowercase field names")
     model = data.get("model")
+    if path == "/api/show" and not model:
+        model = data.get("name")  # older clients; Ollama falls back to it the same way
     if not isinstance(model, str) or not model or len(model) > 200:
         return PolicyResult(body, error="a model name is required")
     if not model_allowed(limits, model):
@@ -166,7 +196,6 @@ def apply_body_policy(
     if remaining_tokens is not None:
         max_predict = max(1, min(max_predict, remaining_tokens) if max_predict else remaining_tokens)
 
-    changed = False
     streaming = False
     if path in _NATIVE_OPTION_ENDPOINTS:
         options = data.get("options")
@@ -185,10 +214,7 @@ def apply_body_policy(
             caps.append(("num_predict", max_predict))
         for key, maximum in caps:
             if maximum > 0:
-                clamped = _clamp_int(options.get(key), maximum)
-                if options.get(key) != clamped:
-                    options[key] = clamped
-                    changed = True
+                options[key] = _clamp_int(options.get(key), maximum)
         if options or "options" in data:
             data["options"] = options
         if path in _GENERATE_API:
@@ -197,29 +223,22 @@ def apply_body_policy(
         if max_predict > 0:
             for key in ("max_tokens", "max_completion_tokens"):
                 if key in data or key == "max_tokens":
-                    clamped = _clamp_int(data.get(key), max_predict)
-                    if data.get(key) != clamped:
-                        data[key] = clamped
-                        changed = True
+                    data[key] = _clamp_int(data.get(key), max_predict)
         streaming = data.get("stream") is True
         if streaming:
             # Ask for a final usage chunk so the stream can be accounted for.
             opts = data.get("stream_options")
             if not isinstance(opts, dict):
                 opts = {}
-            if opts.get("include_usage") is not True:
-                opts["include_usage"] = True
-                data["stream_options"] = opts
-                changed = True
+            opts["include_usage"] = True
+            data["stream_options"] = opts
 
     if "keep_alive" in data:
         seconds = _keep_alive_seconds(data["keep_alive"])
-        if seconds is None or seconds < 0 or seconds > MAX_KEEP_ALIVE_SECONDS:
+        if seconds is None or not 0 <= seconds <= MAX_KEEP_ALIVE_SECONDS:  # NaN fails too
             data["keep_alive"] = f"{MAX_KEEP_ALIVE_SECONDS // 60}m"
-            changed = True
 
-    new_body = json.dumps(data).encode() if changed else body
-    return PolicyResult(new_body, model=model, streaming=streaming)
+    return PolicyResult(json.dumps(data).encode(), model=model, streaming=streaming)
 
 
 def filter_model_list(limits: DeviceLimits, path: str, body: bytes) -> bytes:
