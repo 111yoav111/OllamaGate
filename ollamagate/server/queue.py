@@ -2,7 +2,7 @@
 
 At most ``capacity`` requests are forwarded at once. Waiting requests are
 admitted in priority order (high, normal, low), first come first served
-within a priority. A waiter that gives up (client gone, device kicked) is
+within a priority. A waiter that gives up (client gone, device suspended) is
 simply cancelled and never takes a slot.
 """
 

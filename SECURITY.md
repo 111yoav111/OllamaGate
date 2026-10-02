@@ -93,7 +93,7 @@ and the host machine itself.
   text, never as Rich/Textual markup (toasts included), with control characters
   escaped and long values cut *before* escaping. Logs, including uvicorn's, go
   to an in-memory buffer shown on the dashboard, never to the terminal under
-  the TUI. Revoke, rotate, suspend, kick, lockdown and quit (also Ctrl+Q) ask
+  the TUI. Revoke, rotate, suspend, lockdown and quit (also Ctrl+Q) ask
   for confirmation, and the default button is "No". If the TUI ever crashes,
   the server keeps running headless instead of dropping every device. Redraws
   are throttled to once a second and limited to the visible tab, so a request

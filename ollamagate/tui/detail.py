@@ -37,7 +37,6 @@ class DeviceDetailScreen(Screen[None]):
         Binding("r", "act('revoke')", "Revoke"),
         Binding("t", "act('rotate')", "Rotate token"),
         Binding("s", "act('suspend')", "Suspend/resume"),
-        Binding("k", "act('kick')", "Kick"),
         Binding("n", "act('rename')", "Rename"),
         Binding("l", "act('limits')", "Limits"),
         Binding("o", "notes", "Notes"),

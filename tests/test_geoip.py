@@ -57,3 +57,14 @@ def test_blocked_country_is_refused_even_with_a_token(gate_factory, client):
     blocked = [e for e in gate.state.audit_log if e.event == "geo_blocked"]
     assert blocked and blocked[-1].detail["country"] == "US" and blocked[-1].ip == "8.8.8.8"
     assert client.get(gate.url + "/api/tags", headers=headers).status_code == 200  # loopback
+
+
+def test_dashboard_says_whether_geoip_is_on():
+    from ollamagate.admin.service import Admin
+    from ollamagate.config import Config
+    from ollamagate.state import State
+
+    admin = Admin(State(), Config(), None)
+    assert admin.dashboard()["geoip"].startswith("off")
+    admin.state.geo = geo(allow=["DE"], deny=["US"])
+    assert admin.dashboard()["geoip"] == "on · only DE; blocking US"

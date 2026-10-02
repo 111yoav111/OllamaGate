@@ -96,6 +96,15 @@ def device_view(device: Device, state: State) -> dict[str, Any]:
     }
 
 
+def _geoip_summary(geo: Any) -> str:
+    if geo is None:
+        return "off (set geoip.database in config.toml)"
+    rules = [f"only {', '.join(sorted(geo.allow))}"] if geo.allow else []
+    if geo.deny:
+        rules.append(f"blocking {', '.join(sorted(geo.deny))}")
+    return "on · " + ("; ".join(rules) or "countries shown, nothing blocked")
+
+
 class Admin:
     def __init__(self, state: State, config: Config, fingerprint: str | None) -> None:
         self.state = state
@@ -186,12 +195,6 @@ class Admin:
         self.state.update_device(device.id, allow_model_management=allowed)
         self._audit("model_management", device, allowed=allowed)
         return device_view(device, self.state)
-
-    def kick(self, ref: str) -> dict[str, Any]:
-        device = self._device(ref)
-        killed = self.state.kill_device_streams(device.id, "kicked")
-        self._audit("kick", device, streams_killed=killed)
-        return {"streams_killed": killed}
 
     def set_expiry(self, ref: str, expiry: str | int | None) -> dict[str, Any]:
         """``expiry`` is a preset ("never", "1d", "7d", "30d") or seconds from now."""
@@ -423,6 +426,7 @@ class Admin:
             "pairing": None if window is None else {"expires_at": window.expires_at, "attempts": window.attempts},
             "audit_suppressed": state.audit_suppressed,
             "bans": len(self.list_bans()),
+            "geoip": _geoip_summary(state.geo),
         }
 
     # ----- logs --------------------------------------------------------------------
@@ -449,7 +453,6 @@ class Admin:
         "devices.rotate": "rotate",
         "devices.suspend": "suspend",
         "devices.resume": "resume",
-        "devices.kick": "kick",
         "devices.expiry": "set_expiry",
         "devices.model_management": "set_model_management",
         "devices.limits": "set_limits",

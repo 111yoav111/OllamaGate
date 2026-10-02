@@ -36,7 +36,7 @@ ollamagate serve --no-tui        # headless; manage it with the CLI commands bel
 | **6 Settings** | runtime-changeable settings (until restart) |
 
 Keys: `P` pair · `Enter` device details · `R` revoke · `T` rotate token ·
-`S` suspend/resume · `K` kick · `N` rename · `L` limits (quotas, rate,
+`S` suspend/resume · `N` rename · `L` limits (quotas, rate,
 models, priority, expiry, model management) · `B` ban the device's IP ·
 `O` notes (in details) · `/` search · `Ctrl+L` **LOCKDOWN** · `Q` quit. Destructive actions ask for confirmation.
 
@@ -103,7 +103,6 @@ ollamagate devices limits <id> [--tokens-per-day N --allowed-models llama3,qwen2
 ollamagate devices ban-ip <id>            # ban its last IP and suspend it
 ollamagate bans list|add <ip>|remove <ip>
 ollamagate devices suspend|resume <id>
-ollamagate devices kick <id>             # end its active requests now
 ollamagate devices revoke <id>           # must pair again
 ollamagate devices rotate <id> [--grace 60]   # prints a new token once
 ollamagate devices expiry <id> never|1d|7d|30d|<seconds>

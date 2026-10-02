@@ -406,13 +406,6 @@ def devices_resume(device_id: str, config_path: Optional[Path] = ConfigOption) -
     typer.echo(f"Resumed {safe(d['name'])!r}.")
 
 
-@devices_cli.command("kick")
-def devices_kick(device_id: str, config_path: Optional[Path] = ConfigOption) -> None:
-    """Terminate a device's active requests now."""
-    result = _call(config_path, "devices.kick", ref=device_id)
-    typer.echo(f"Terminated {result['streams_killed']} active request(s).")
-
-
 @devices_cli.command("expiry")
 def devices_expiry(
     device_id: str,
@@ -451,6 +444,7 @@ def status(config_path: Optional[Path] = ConfigOption) -> None:
         ("Active streams", d["active_streams"]),
         ("Requests", f"{d['requests_last_minute']}/min, {d['requests_today']} today"),
         ("Pairing", pairing_state),
+        ("GeoIP", d["geoip"]),
     ]
     for label, value in rows:
         typer.echo(f"{label + ':':16} {safe(value)}")

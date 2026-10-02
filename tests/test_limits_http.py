@@ -102,7 +102,7 @@ def test_abandoned_request_is_charged_for_its_prompt(gate, client):
     t = threading.Thread(target=lambda: client.post(gate.url + "/api/chat", headers=bearer(gate.token), json=body))
     t.start()
     assert wait_for(lambda: len(gate.recorder.requests) == 1)  # Ollama is working on it
-    gate.call(lambda: gate.state.kill_device_streams(gate.device.id, "kicked"))
+    gate.call(lambda: gate.state.kill_device_streams(gate.device.id, "suspended"))
     t.join(5)
     assert wait_for(lambda: gate.state.usage_today(gate.device.id).prompt_tokens == 100)  # capped at a context
     bad = client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m", "options": "x"})

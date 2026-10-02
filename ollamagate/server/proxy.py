@@ -6,7 +6,7 @@ ends as soon as any of these happens:
 
 * Ollama finishes the response,
 * the client disconnects (the upstream request is closed, so Ollama stops), or
-* the stream is killed (revoke / kick / lockdown) - within one event-loop tick,
+* the stream is killed (revoke / suspend / lockdown) - within one event-loop tick,
   even if the client has stopped reading.
 """
 

@@ -57,7 +57,6 @@ class DeviceTable(DataTable):
         Binding("r", "app.device_revoke", "Revoke"),
         Binding("t", "app.device_rotate", "Rotate token"),
         Binding("s", "app.device_suspend", "Suspend/resume"),
-        Binding("k", "app.device_kick", "Kick"),
         Binding("n", "app.device_rename", "Rename"),
         Binding("l", "app.device_limits", "Limits"),
         Binding("b", "app.device_ban", "Ban IP"),
@@ -287,6 +286,7 @@ class GateTUI(App[None]):
             ("Requests", f"{d['requests_last_minute']}/min · {d['requests_today']} today"),
             ("Tokens today", str(d["tokens_today"])),
             ("Banned clients", str(d["bans"])),
+            ("GeoIP", d["geoip"]),
             ("Pairing", "closed" if pairing is None else f"OPEN · {int(pairing['expires_at'] - time.time())}s left"),
         ]
         if d["audit_suppressed"]:
@@ -325,7 +325,7 @@ class GateTUI(App[None]):
                 ACTIVITY_DOT.get(d["activity"], Text("?")),
                 t(d["name"]),
                 t(d["id"][:8]),
-                t(d["last_ip"]),
+                t(f"{d['last_ip']} ({d['last_country']})" if d.get("last_country") else d["last_ip"]),
                 t(d["client"]),
                 t(d["paired_via"]),
                 t(ago(d["last_seen"])),
@@ -640,17 +640,6 @@ class GateTUI(App[None]):
                 )
             else:
                 self.say("Revoked devices can't be suspended", severity="warning")
-
-        self._with_device(ask)
-
-    def action_device_kick(self) -> None:
-        def ask(d: dict[str, Any]) -> None:
-            def go(ok: bool | None) -> None:
-                result = self._run_admin(self.admin.kick, d["id"]) if ok else None
-                if result is not None:
-                    self.say(f"Terminated {result['streams_killed']} request(s)")
-
-            self.push_screen(ConfirmScreen(f"End all active requests of {t(d['name']).plain}?"), go)
 
         self._with_device(ask)
 

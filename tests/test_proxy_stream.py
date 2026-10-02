@@ -224,11 +224,11 @@ def test_kill_before_first_byte(gate, client):
     t.start()
     assert wait_for(lambda: len(gate.state.streams) == 1)
     killed_at = time.monotonic()
-    gate.call(lambda: gate.state.kill_device_streams(gate.device.id, "kicked"))
+    gate.call(lambda: gate.state.kill_device_streams(gate.device.id, "suspended"))
     t.join(5)
     assert result["done_at"] - killed_at < 1.0
     assert result["r"].status_code == 503
-    assert result["r"].json() == {"error": "request terminated: kicked"}
+    assert result["r"].json() == {"error": "request terminated: suspended"}
     assert wait_for(lambda: gate.state.streams == {})
 
 

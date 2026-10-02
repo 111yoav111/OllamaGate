@@ -388,9 +388,9 @@ async def test_unexpected_error_in_action_does_not_kill_tui(monkeypatch):
     admin = make_admin()
     add_device(admin.state)
     app = GateTUI(admin)
-    monkeypatch.setattr(admin, "kick", lambda ref: 1 / 0)
+    monkeypatch.setattr(admin, "suspend", lambda ref: 1 / 0)
     async with app.run_test(size=(140, 45)) as pilot:
-        await pilot.press("2", "k", "y")
+        await pilot.press("2", "s", "y")
         await pilot.pause()
         assert app.is_running
 
