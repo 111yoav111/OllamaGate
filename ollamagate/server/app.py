@@ -260,7 +260,7 @@ def create_app(
         fingerprint = auth.hash_token(attempt)[:16] if attempt else ""
         ban = state.bans.record_failure(ip, reason, fingerprint)
         if ban is not None:
-            state.audit("ban_auto", ip=ip, reason=reason, strikes=ban.strikes, until=ban.until)
+            state.audit_noisy("ban_auto", ip=ip, reason=reason, strikes=ban.strikes, until=ban.until)
             log.warning("banned %s (%s, strike %d)", ban.key, reason, ban.strikes)
 
     @app.get("/healthz", include_in_schema=False)
@@ -355,7 +355,7 @@ def create_app(
         if kind is None:
             return error(404, "not found")
         if kind is EndpointKind.MANAGEMENT and not device.allow_model_management:
-            state.audit("endpoint_denied", ip=ip, device_id=device.id, path=path, method=method)
+            state.audit_noisy("endpoint_denied", ip=ip, device_id=device.id, path=path, method=method)
             return error(403, "endpoint not allowed for this device")
         if path.startswith("/v1/models/") and not model_allowed(limits, path.removeprefix("/v1/models/")):
             return error(404, "not found")
@@ -391,7 +391,7 @@ def create_app(
                 used = counter.result()
                 state.add_usage(device.id, prompt_tokens=used.prompt_tokens, completion_tokens=used.completion_tokens)
                 if not used.exact:
-                    state.audit("usage_estimated", ip=ip, device_id=device.id, tokens=used.total, outcome=outcome_name)
+                    state.audit_noisy("usage_estimated", ip=ip, device_id=device.id, tokens=used.total, outcome=outcome_name)
             state.log_request(
                 RequestLogEntry(
                     ts=time.time(),

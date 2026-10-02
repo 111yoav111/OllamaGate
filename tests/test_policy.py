@@ -366,3 +366,26 @@ def test_scrub_modelfile_adapter_and_relative_from():
     mf = "FROM llama3:8b\nADAPTER /home/u/lora.gguf\nSYSTEM use /tmp/x/ paths\n"
     out = json.loads(scrub_response("/api/show", 200, body(modelfile=mf)))["modelfile"]
     assert out == "FROM llama3:8b\n# ADAPTER (local path hidden)\nSYSTEM use /tmp/x/ paths\n"
+
+
+def test_ban_table_is_bounded(monkeypatch):
+    import ollamagate.bans as bans_mod
+
+    monkeypatch.setattr(bans_mod, "MAX_TRACKED_CLIENTS", 5)
+    bans = BanList(threshold=1)
+    keep = bans.ban("198.51.100.1", "manual", None)
+    for i in range(20):
+        bans.record_failure(f"2001:db8:0:{i:x}::1", "auth", fingerprint=str(i), now=1000.0 + i)
+    assert len(bans.bans) <= 5 and len(bans._strikes) <= 5
+    assert bans.bans[keep.key] is keep  # manual bans are never evicted
+    assert bans.banned("2001:db8:0:13::1", now=1020.0) is not None  # the newest is kept
+
+
+def test_noisy_audit_has_a_global_cap():
+    from ollamagate.state import NOISY_EVENTS_PER_MINUTE_TOTAL, State
+
+    state = State()
+    for i in range(1000):  # every hit from a different /64
+        state.audit_noisy("auth_failed", ip=f"2001:db8:{i:x}::1")
+    assert len(state.audit_log) == NOISY_EVENTS_PER_MINUTE_TOTAL
+    assert state.audit_suppressed == 1000 - NOISY_EVENTS_PER_MINUTE_TOTAL

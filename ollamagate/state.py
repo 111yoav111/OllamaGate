@@ -27,6 +27,9 @@ from .textsafe import safe_text
 MAX_IP_HISTORY = 20
 MAX_AUDIT_FIELD = 200
 NOISY_EVENTS_PER_MINUTE = 10
+# ...and at most this many per event from everyone together, so an attacker
+# with many addresses (an IPv6 /48 is 65k /64s) can't flush the audit log either.
+NOISY_EVENTS_PER_MINUTE_TOTAL = 100
 USAGE_KEEP_DAYS = 62
 
 
@@ -202,6 +205,7 @@ class State:
         # Unauthenticated noise (failed logins etc.) is capped per client so an
         # attacker can't flush real events out of the bounded audit log.
         self._noise_limiter = RateLimiter(NOISY_EVENTS_PER_MINUTE, 60.0)
+        self._noise_total = RateLimiter(NOISY_EVENTS_PER_MINUTE_TOTAL, 60.0)
         self.audit_suppressed = 0
         # Called with every new AuditEntry (e.g. owner notifications); must not block.
         self.audit_listeners: list[Any] = []
@@ -253,9 +257,10 @@ class State:
         return entry
 
     def audit_noisy(self, event: str, *, ip: str | None, **detail: Any) -> AuditEntry | None:
-        """Audit an event an unauthenticated client can trigger at will, at most
-        NOISY_EVENTS_PER_MINUTE times per client per event; the rest are counted."""
-        if not self._noise_limiter.hit(f"{event}|{client_key(ip)}"):
+        """Audit an event a client can trigger at will, at most NOISY_EVENTS_PER_MINUTE
+        times per client and NOISY_EVENTS_PER_MINUTE_TOTAL overall per event; the
+        rest are only counted."""
+        if not self._noise_limiter.hit(f"{event}|{client_key(ip)}") or not self._noise_total.hit(event):
             self.audit_suppressed += 1
             return None
         return self.audit(event, ip=ip, **detail)

@@ -56,7 +56,7 @@ class BanList:
         self.max_ban_seconds = max_ban_seconds
         self.bans: dict[str, Ban] = {}
         self._failures: OrderedDict[str, deque[tuple[float, str]]] = OrderedDict()  # (time, fingerprint)
-        self._strikes: dict[str, tuple[int, float]] = {}  # key -> (count, when the last ban ended)
+        self._strikes: OrderedDict[str, tuple[int, float]] = OrderedDict()  # key -> (count, when the last ban ended)
 
     def configure(self, threshold: int, window_seconds: float, ban_seconds: float, max_ban_seconds: float) -> None:
         self.threshold = threshold
@@ -110,7 +110,15 @@ class BanList:
             count = 0  # quiet for a day after the last ban ended: start over
         count += 1
         duration = min(self.ban_seconds * 2 ** (count - 1), self.max_ban_seconds)
+        self._strikes.pop(key, None)
+        if len(self._strikes) >= MAX_TRACKED_CLIENTS:
+            self._strikes.popitem(last=False)
         self._strikes[key] = (count, now + duration)
+        if len(self.bans) >= MAX_TRACKED_CLIENTS:
+            # Full (someone with a huge address range): drop the auto-ban that ends soonest.
+            auto = [b for b in self.bans.values() if not b.manual]
+            if auto:
+                del self.bans[min(auto, key=lambda b: b.until or 0.0).key]
         ban = Ban(key=key, reason=reason, created_at=now, until=now + duration, manual=False, strikes=count)
         self.bans[key] = ban
         return ban
