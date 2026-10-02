@@ -7,6 +7,7 @@ import os
 import socket
 import stat
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -219,6 +220,22 @@ def check_network_mode(config: Config) -> list[Finding]:
     return findings
 
 
+def check_geoip(config: Config) -> list[Finding]:
+    if not config.geoip.database:
+        return []
+    from . import geoip
+
+    try:
+        geo = geoip.load(config.geoip)
+    except (OSError, ValueError) as exc:
+        return [Finding("error", f"GeoIP database can't be opened: {exc}", "Fix or remove geoip.database.")]
+    meta = geo.reader.metadata()
+    age_days = (time.time() - meta.build_epoch) / 86400
+    if age_days > 62:
+        return [Finding("warn", f"GeoIP database is {age_days:.0f} days old", "Download a fresh one (they update monthly).")]
+    return [Finding("ok", f"GeoIP database loaded ({meta.database_type}, {age_days:.0f} days old)")]
+
+
 def run_all(config: Config) -> list[Finding]:
     return (
         check_ollama_running(config)
@@ -227,4 +244,5 @@ def run_all(config: Config) -> list[Finding]:
         + check_network_mode(config)
         + check_files(config)
         + check_config(config)
+        + check_geoip(config)
     )

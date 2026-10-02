@@ -80,6 +80,7 @@ def device_view(device: Device, state: State) -> dict[str, Any]:
         "paired_at": device.paired_at,
         "last_seen": device.last_seen,
         "last_ip": device.last_ip,
+        "last_country": state.geo.country(device.last_ip) if state.geo is not None else None,
         "last_port": device.last_port,
         "user_agent": device.user_agent,
         "token_prefix": device.token_prefix,

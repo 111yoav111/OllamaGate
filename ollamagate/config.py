@@ -124,6 +124,15 @@ class NotifyConfig:
 
 
 @dataclass
+class GeoIPConfig:
+    """Offline GeoIP (see ollamagate/geoip.py). Off unless a database is set."""
+
+    database: str = ""  # path to a country .mmdb (DB-IP Country Lite / GeoLite2-Country)
+    allow_countries: list[str] = field(default_factory=list)  # ISO codes; empty = all
+    deny_countries: list[str] = field(default_factory=list)
+
+
+@dataclass
 class LoggingConfig:
     audit_size: int = 5000
     request_log_size: int = 5000
@@ -141,6 +150,7 @@ class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     bans: BansConfig = field(default_factory=BansConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    geoip: GeoIPConfig = field(default_factory=GeoIPConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_dir: Path = field(default_factory=default_config_dir)
 
@@ -216,6 +226,14 @@ class Config:
             raise ConfigError("pairing.max_attempts must be between 1 and 10")
         if self.limits.priority not in ("low", "normal", "high"):
             raise ConfigError("limits.priority must be low, normal or high")
+        g = self.geoip
+        for name in ("allow_countries", "deny_countries"):
+            codes = [c.strip().upper() for c in getattr(g, name)]
+            if any(len(c) != 2 or not c.isascii() or not c.isalpha() for c in codes):
+                raise ConfigError(f"geoip.{name} must be two-letter ISO country codes, e.g. [\"DE\", \"FR\"]")
+            setattr(g, name, codes)
+        if (g.allow_countries or g.deny_countries) and not g.database:
+            raise ConfigError("geoip.allow_countries / deny_countries need geoip.database")
 
     @property
     def base_url(self) -> str:
@@ -303,7 +321,7 @@ def _apply(section_obj: typing.Any, data: dict, section: str) -> None:
         setattr(section_obj, key, _coerce(value, hints[key], f"{section}.{key}"))
 
 
-SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "bans", "notify", "logging")
+SECTIONS = ("server", "network", "ollama", "tls", "pairing", "limits", "bans", "notify", "geoip", "logging")
 
 
 def load_config(path: Path | None = None, env: typing.Mapping[str, str] | None = None) -> Config:

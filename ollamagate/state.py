@@ -213,6 +213,8 @@ class State:
         # Signs browser CSRF tokens; new on every start, like everything else.
         self.csrf_key = secrets.token_bytes(32)
         self.bans = bans or BanList()
+        # Offline GeoIP (geoip.GeoIP) or None; adds "country" to audit entries.
+        self.geo: Any = None
         # Per-device requests-per-minute accounting (limits vary per device).
         self.device_rpm = RateLimiter(60, 60.0)
         # (device_id, "YYYY-MM-DD") -> usage for that local day
@@ -230,6 +232,9 @@ class State:
         self, event: str, *, ip: str | None = None, device_id: str | None = None, **detail: Any
     ) -> AuditEntry:
         self.audit_seq += 1
+        country = self.geo.country(ip) if self.geo is not None and ip else None
+        if country:
+            detail.setdefault("country", country)
         entry = AuditEntry(
             seq=self.audit_seq,
             ts=time.time(),

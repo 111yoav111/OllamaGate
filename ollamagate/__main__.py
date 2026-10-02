@@ -101,6 +101,13 @@ def serve(
     for note in network_notes:
         log_lines.append(f"network: {note}")
     state = State(config.logging.audit_size, config.logging.request_log_size)
+    from . import geoip
+
+    try:
+        state.geo = geoip.load(config.geoip)
+    except (OSError, ValueError) as exc:  # fail closed: country rules must not silently vanish
+        typer.secho(f"GeoIP database error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     tls_info = prepare_tls(config)
     # Only a self-signed certificate is pinned in pairing links; CA-issued ones
     # (Tailscale, Let's Encrypt) are renewed and reloaded, so a pin would go stale.
@@ -319,7 +326,7 @@ def _print_device(d: dict[str, Any]) -> None:
         ("Name", safe(d["name"])),
         ("Status", d["status"]),
         ("Paired via", f"{d['paired_via']} at {_ts(d['paired_at'])}"),
-        ("Last seen", f"{_ts(d['last_seen'])} from {safe(d['last_ip'] or '-')}"),
+        ("Last seen", f"{_ts(d['last_seen'])} from {safe(d['last_ip'] or '-')}" + (f" ({safe(d['last_country'])})" if d.get("last_country") else "")),
         ("User agent", safe(d["user_agent"] or "-")),
         ("Token", d["token_prefix"]),
         ("Token expires", _ts(d["token_expires_at"]) if d["token_expires_at"] else "never"),

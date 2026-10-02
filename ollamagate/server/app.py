@@ -114,11 +114,12 @@ def unauthorized() -> JSONResponse:
 
 
 class BanMiddleware:
-    """Refuse requests from banned clients before any routing happens.
+    """Refuse requests from banned clients and blocked countries before any routing.
 
-    A request carrying a valid device credential still gets through: bans exist
-    to stop guessing, and punishing a paired device for sharing an IP (NAT) with
-    an attacker would turn bans into a denial-of-service tool.
+    A banned client carrying a valid device credential still gets through: bans
+    exist to stop guessing, and punishing a paired device for sharing an IP (NAT)
+    with an attacker would turn bans into a denial-of-service tool. Country
+    rules are the owner's explicit choice, so they apply to everyone.
     """
 
     def __init__(self, app: ASGIApp, state: State, trusted: Any, network_mode: str) -> None:
@@ -131,6 +132,11 @@ class BanMiddleware:
         if scope["type"] == "http":
             peer = scope.get("client")
             ip = resolve_client_ip(peer[0] if peer else None, Headers(scope=scope), self.trusted, self.network_mode)
+            geo = self.state.geo
+            if geo is not None and not geo.permits(ip):
+                self.state.audit_noisy("geo_blocked", ip=ip)
+                await forbidden()(scope, receive, send)
+                return
             if self.state.bans.banned(ip) is not None and not self._has_valid_credential(scope):
                 await forbidden()(scope, receive, send)
                 return

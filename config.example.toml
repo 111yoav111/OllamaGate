@@ -59,6 +59,14 @@ telegram_chat_id = ""
 desktop = false              # notify-send (Linux) / osascript (macOS)
 events = ["pairing", "new_ip", "ban", "lockdown"]
 
+[geoip]                      # offline: a local country database, no lookups leave the machine
+database = ""                # path to a .mmdb, e.g. DB-IP "IP to Country Lite" (free, no account):
+                             #   https://db-ip.com/db/download/ip-to-country-lite
+                             # or MaxMind GeoLite2-Country. Countries then show in the audit log.
+allow_countries = []         # e.g. ["DE", "AT"]: refuse every other country (and unknown addresses)
+deny_countries = []          # e.g. ["XX"]: refuse these countries
+                             # LAN, loopback and Tailscale addresses are never filtered.
+
 [logging]
 audit_size = 5000
 request_log_size = 5000

@@ -184,6 +184,26 @@ a client gets banned, or lockdown changes - via [ntfy](https://ntfy.sh), a
 Telegram bot, or a desktop notification. All off by default; see `[notify]`
 in `config.example.toml`. Messages never contain tokens or prompts.
 
+## Country filtering (GeoIP)
+
+Point `geoip.database` at a local country database - the free
+[DB-IP IP to Country Lite](https://db-ip.com/db/download/ip-to-country-lite)
+`.mmdb` (no account needed) or MaxMind GeoLite2-Country - and the audit log,
+device details and notifications show each client's country. Lookups are
+offline. Then optionally:
+
+```toml
+[geoip]
+database = "/home/me/.config/ollamagate/dbip-country-lite.mmdb"
+allow_countries = ["DE", "AT"]   # refuse everyone else, paired devices included
+deny_countries = []
+```
+
+Blocked clients get `403` before any routing. Loopback, LAN and Tailscale
+addresses are never filtered; an address the database can't place is refused
+when an allowlist is set. The databases update monthly: download a fresh one
+and restart (`ollamagate doctor` warns when it's over two months old).
+
 ## Running as a service
 
 ```bash

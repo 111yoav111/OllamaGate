@@ -52,8 +52,8 @@ def describe(entry: AuditEntry, state: State) -> str | None:
     device = state.get_device(entry.device_id) if entry.device_id else None
     # Quoted, so a device named e.g. "Lockdown lifted" can't pose as a system message.
     name = f'"{safe_text(device.name, 64)}"' if device else "a device"
-    ip = safe_text(entry.ip or "?", 64)
     d = entry.detail
+    ip = safe_text(entry.ip or "?", 64) + (f" ({safe_text(str(d['country']), 8)})" if d.get("country") else "")
     if entry.event == "pairing_succeeded":
         return f"New device paired: {name} (via {d.get('method', '?')}) from {ip}"
     if entry.event == "device_new_ip":

@@ -182,13 +182,21 @@ and the host machine itself.
   contains a path is replaced by a generic `upstream error`. Anything that isn't
   the JSON shape expected is replaced too (fail closed). Errors that arrive
   *inside* a 200 stream are not rewritten (the status line is already sent).
+- **GeoIP (opt-in, `[geoip]`).** Countries come from a local `.mmdb` file;
+  no address is ever sent to a lookup service. With `allow_countries` /
+  `deny_countries`, requests from other countries are refused (`403`) before
+  routing, ahead of bans and authentication, so a valid token doesn't get
+  through from a blocked country. Non-global addresses (loopback, private,
+  CGNAT/Tailscale) are never filtered; a public address the database can't
+  place fails an allowlist. A database configured but unreadable stops the
+  server from starting rather than silently dropping the rules. GeoIP is coarse:
+  VPNs and proxies defeat it, so it narrows the crowd, it isn't authentication.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
 ## Not yet protected (planned)
 
-- TOTP for admin actions and offline GeoIP (need
-  new dependencies; not added without the owner's approval).
+- TOTP for admin actions.
 
 ## Known limitations
 

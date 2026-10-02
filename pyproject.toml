@@ -18,6 +18,7 @@ dependencies = [
     "qrcode>=7.4,<9",
     "cryptography>=42,<51",
     "typer>=0.12,<1",
+    "maxminddb>=2.6,<4",
 ]
 
 classifiers = [

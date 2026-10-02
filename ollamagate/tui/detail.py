@@ -82,7 +82,7 @@ class DeviceDetailScreen(Screen[None]):
             ("Status", status),
             ("Paired via", t(f"{d['paired_via']} at {ts(d['paired_at'])}")),
             ("Last seen", t(f"{ago(d['last_seen'])} ({ts(d['last_seen'])})")),
-            ("Current IP", t(f"{d['last_ip'] or '-'}:{d['last_port'] or '-'}")),
+            ("Current IP", t(f"{d['last_ip'] or '-'}:{d['last_port'] or '-'}" + (f" ({d['last_country']})" if d.get("last_country") else ""))),
             ("Client", t(d["client"])),
             ("User agent", t(d["user_agent"])),
             ("Active now", t(", ".join(d["current_models"]) or f"{d['active_streams']} stream(s)")),
