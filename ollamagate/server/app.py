@@ -36,8 +36,10 @@ from .policy import (
     EndpointKind,
     apply_body_policy,
     classify_endpoint,
+    SCRUBBED_PATHS,
     filter_model_list,
     model_allowed,
+    scrub_response,
 )
 from .queue import PriorityGate, Ticket
 from .usage import UsageCounter
@@ -62,6 +64,7 @@ def error(status: int, message: str, headers: dict[str, str] | None = None) -> J
 
 
 MAX_LISTING_BYTES = 2 * 1024 * 1024
+MAX_SHOW_BYTES = 32 * 1024 * 1024  # verbose /api/show carries the whole vocabulary
 
 
 def seconds_until_midnight() -> int:
@@ -468,17 +471,21 @@ def create_app(
                 finish("upstream_error", 502, 0)
                 return error(502, "upstream unavailable")
 
-            if limits.allowed_models and method == "GET" and path in ("/api/tags", "/api/ps", "/v1/models"):
-                # Small JSON listings: buffer them to hide models this device may not use.
+            if upstream.status_code >= 400 or path in SCRUBBED_PATHS or path == "/v1/models":
+                # Small JSON bodies: buffer them to hide models this device may not
+                # use and the host's file paths (errors, Modelfile, parent_model).
+                cap = MAX_SHOW_BYTES if path == "/api/show" else MAX_LISTING_BYTES
                 try:
-                    raw = await race_kill(read_capped(upstream, MAX_LISTING_BYTES), stream, request.receive)
+                    raw = await race_kill(read_capped(upstream, cap), stream, request.receive)
                 except httpx.HTTPError as exc:
                     log.warning("upstream listing failed: %s", type(exc).__name__)
                     finish("upstream_error", 502, 0)
                     return error(502, "upstream unavailable")
                 finally:
                     await upstream.aclose()
-                content = filter_model_list(limits, path, raw)
+                content = scrub_response(path, upstream.status_code, raw, policy.model)
+                if upstream.status_code < 400 and path != "/api/show":
+                    content = filter_model_list(limits, path, content)
                 finish("complete", upstream.status_code, len(content))
                 return Response(content, status_code=upstream.status_code, media_type="application/json")
 

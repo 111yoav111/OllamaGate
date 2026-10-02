@@ -133,9 +133,22 @@ def test_shutdown_with_active_stream_is_prompt(gate_factory, client):
 
 
 def test_upstream_error_midway_in_json_is_not_a_clean_response(gate):
-    with pytest.raises(httpx.HTTPError):
-        httpx.post(gate.url + "/api/show", headers=bearer(gate.token), json={"model": "m"}).json()
+    r = httpx.post(gate.url + "/api/show", headers=bearer(gate.token), json={"model": "broken"})
+    assert r.status_code == 502 and r.json() == {"error": "upstream unavailable"}
     assert wait_for(lambda: gate.state.streams == {})
+
+
+def test_host_paths_never_reach_devices(gate, client):
+    """Modelfile FROM lines, parent_model and raw Go errors name files on the host."""
+    show = client.post(gate.url + "/api/show", headers=bearer(gate.token), json={"model": "m"})
+    tags = client.get(gate.url + "/api/tags", headers=bearer(gate.token))
+    err = client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "missing-blob"})
+    for r in (show, tags, err):
+        assert "/mnt/" not in r.text and "/usr/share" not in r.text and "/srv/" not in r.text and "Users" not in r.text
+    assert "FROM m\n" in show.json()["modelfile"] and show.json()["details"]["parent_model"] == ""
+    assert show.json()["license"] == "see https://example.com/a/b/LICENSE"
+    assert [m["name"] for m in tags.json()["models"]] == ["llama3:8b", "qwen2:7b"]
+    assert err.status_code == 500 and err.json() == {"error": "upstream error"}
 
 
 def test_expired_token_over_http(gate, client):

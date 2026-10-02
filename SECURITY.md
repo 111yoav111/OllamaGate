@@ -174,6 +174,14 @@ and the host machine itself.
   response as the token, so mTLS protects against a token that leaks *later on
   its own* (logs, config files, shoulder-surfing), not against someone who
   captured the pairing response or controls the device.
+- **Host paths stay private.** Ollama names model files by absolute path in
+  `/api/show` (`FROM /path/to/blob`), in `details.parent_model` of
+  `/api/tags`, `/api/ps` and `/api/show`, and in raw Go error messages. Those
+  responses are buffered and scrubbed: the `FROM` path becomes the model name,
+  `ADAPTER` paths and `parent_model` are blanked, and an error whose message
+  contains a path is replaced by a generic `upstream error`. Anything that isn't
+  the JSON shape expected is replaced too (fail closed). Errors that arrive
+  *inside* a 200 stream are not rewritten (the status line is already sent).
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
@@ -181,8 +189,6 @@ and the host machine itself.
 
 - TOTP for admin actions and offline GeoIP (need
   new dependencies; not added without the owner's approval).
-- Ollama error bodies and `/api/show` output are passed through unchanged and
-  may reveal local file paths of model files to paired devices.
 
 ## Known limitations
 

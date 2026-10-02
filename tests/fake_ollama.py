@@ -66,6 +66,8 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         chunks = int(body.get("fake_chunks", 3))
         delay = float(body.get("fake_delay", 0.0))
         model = body.get("model", "test")
+        if model == "missing-blob":  # a raw Go error, as Ollama sends for a damaged model
+            return JSONResponse({"error": "open /srv/secret/.ollama/models/blobs/sha256-ab: no such file"}, status_code=500)
         await asyncio.sleep(float(body.get("fake_first_delay", 0.0)))  # e.g. model loading
         if body.get("stream") is False:
             return JSONResponse(
@@ -98,7 +100,14 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
 
     async def tags(request: Request):
         await record(request)
-        return JSONResponse({"models": [{"name": "llama3:8b"}, {"name": "qwen2:7b"}]})
+        return JSONResponse(
+            {
+                "models": [
+                    {"name": "llama3:8b", "details": {"parent_model": "C:\\Users\\me\\.ollama\\blob"}},
+                    {"name": "qwen2:7b"},
+                ]
+            }
+        )
 
     async def openai_models(request: Request):
         await record(request)
@@ -108,9 +117,22 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         await record(request)
         return JSONResponse({"version": "0.0.0-fake"}, headers={"x-upstream-secret": "leak"})
 
-    async def broken_json(request: Request):
+    async def show(request: Request):
+        """Like Ollama's: the Modelfile names the blob by its absolute path."""
+        entry = await record(request)
+        if (entry["body"] or {}).get("model") == "broken":
+            return broken_json()
+        return JSONResponse(
+            {
+                "modelfile": "# Modelfile\nFROM /mnt/Games/ollama/blobs/sha256-d3\nPARAMETER stop </s>\n",
+                "template": "{{ .Prompt }}",
+                "license": "see https://example.com/a/b/LICENSE",
+                "details": {"parent_model": "/usr/share/ollama/.ollama/models/blobs/sha256-d3", "format": "gguf"},
+            }
+        )
+
+    def broken_json():
         """Starts a JSON body, then dies mid-response (upstream crash)."""
-        await record(request)
 
         async def body():
             yield b'{"modelfile": "partial'
@@ -146,7 +168,7 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
         Route("/v1/models", openai_models, methods=["GET"]),
         Route("/api/version", version, methods=["GET"]),
         Route("/api/pull", generic, methods=["POST"]),
-        Route("/api/show", broken_json, methods=["POST"]),
+        Route("/api/show", show, methods=["POST"]),
         Route("/api/embed", infinite, methods=["POST"]),
         Route("/api/delete", generic, methods=["DELETE"]),
         Route("/api/internal", generic, methods=["GET", "POST"]),

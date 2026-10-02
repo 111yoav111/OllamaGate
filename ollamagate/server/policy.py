@@ -241,3 +241,73 @@ def filter_model_list(limits: DeviceLimits, path: str, body: bytes) -> bytes:
         if isinstance(m, dict) and isinstance(m.get(name_key), str) and model_allowed(limits, m[name_key])
     ]
     return json.dumps(data).encode()
+
+
+# ----- response scrubbing ---------------------------------------------------------------
+
+# An absolute host path: "/x/" not glued to a word, URL or relative path, a
+# drive letter ("C:\" / "C:/") or a UNC share ("\\host").
+_ABS_PATH_RE = re.compile(r"(?<![\w/:.~-])/[^\s/'\"]+/|\b[A-Za-z]:[\\/]|\\\\[^\s\\]")
+_MODELFILE_PATH_RE = re.compile(r"^(FROM|ADAPTER)[ \t]+(\S.*)$", re.MULTILINE)
+SCRUBBED_PATHS = {"/api/tags", "/api/ps", "/api/show"}
+GENERIC_UPSTREAM_ERROR = "upstream error"
+
+
+def has_host_path(text: str) -> bool:
+    return bool(_ABS_PATH_RE.search(text))
+
+
+def _scrub_error(body: bytes) -> bytes:
+    """Ollama passes raw Go errors through, e.g. ``open /home/x/.ollama/...``."""
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        message = err.get("message") if isinstance(err, dict) else err
+        if isinstance(message, str) and not has_host_path(message):
+            return body
+    return json.dumps({"error": GENERIC_UPSTREAM_ERROR}).encode()
+
+
+def _scrub_details(item: object) -> None:
+    details = item.get("details") if isinstance(item, dict) else None
+    if isinstance(details, dict) and isinstance(details.get("parent_model"), str) and has_host_path(details["parent_model"]):
+        details["parent_model"] = ""
+
+
+def _scrub_modelfile(text: str, model: str) -> str:
+    def fix(m: re.Match[str]) -> str:
+        if not has_host_path(m.group(2)):
+            return m.group(0)
+        return f"FROM {model}" if m.group(1) == "FROM" else "# ADAPTER (local path hidden)"
+
+    return _MODELFILE_PATH_RE.sub(fix, text)
+
+
+def scrub_response(path: str, status: int, body: bytes, model: str = "") -> bytes:
+    """Hide the host's file paths from Ollama responses before they leave.
+
+    Covers error bodies, ``details.parent_model`` in listings and the
+    ``FROM``/``ADAPTER`` lines of ``/api/show``'s Modelfile. Fails closed:
+    a body that isn't the JSON we expect is replaced.
+    """
+    if status >= 400:
+        return _scrub_error(body)
+    if path not in SCRUBBED_PATHS:
+        return body
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, dict):
+        return json.dumps({"models": []} if path != "/api/show" else {}).encode()
+    if path == "/api/show":
+        _scrub_details(data)
+        if isinstance(data.get("modelfile"), str):
+            data["modelfile"] = _scrub_modelfile(data["modelfile"], model or "model")
+    elif isinstance(data.get("models"), list):
+        for item in data["models"]:
+            _scrub_details(item)
+    return json.dumps(data).encode()

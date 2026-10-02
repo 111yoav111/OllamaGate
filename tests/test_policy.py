@@ -8,7 +8,7 @@ import json
 import pytest
 
 from ollamagate.bans import BanList
-from ollamagate.server.policy import apply_body_policy, filter_model_list, model_allowed, normalize_model
+from ollamagate.server.policy import apply_body_policy, filter_model_list, model_allowed, normalize_model, scrub_response
 from ollamagate.server.queue import PriorityGate
 from ollamagate.server.usage import UsageCounter
 from ollamagate.state import DeviceLimits
@@ -311,3 +311,35 @@ def test_embeddings_num_ctx_clamped_only_when_given():
     assert json.loads(r.body)["options"] == {"num_ctx": 1024}
     raw = body(model="m", input="x")
     assert apply_body_policy(lim, "/api/embed", raw).body is raw  # untouched: Ollama's default applies
+
+
+# ----- response scrubbing ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("msg, leaks", [
+    ("model 'nope:latest' not found", False),
+    ("model 'library/llama3' not found", False),
+    ("invalid model name", False),
+    ("see https://ollama.com/a/b", False),
+    ("open /home/u/.ollama/models/x: no such file", True),
+    (r"open C:\Users\u\.ollama: denied", True),
+    (r"\\nas\share\blob missing", True),
+])
+def test_scrub_error_messages(msg, leaks):
+    out = json.loads(scrub_response("/api/chat", 500, body(error=msg)))
+    assert out == ({"error": "upstream error"} if leaks else {"error": msg})
+    out = json.loads(scrub_response("/v1/chat/completions", 400, body(error={"message": msg, "type": "x"})))
+    assert ("message" not in json.dumps(out)) is leaks
+
+
+def test_scrub_fails_closed():
+    assert json.loads(scrub_response("/api/chat", 502, b"<html>/var/x/</html>")) == {"error": "upstream error"}
+    assert json.loads(scrub_response("/api/show", 200, b"garbage")) == {}
+    assert json.loads(scrub_response("/api/tags", 200, b"[1]")) == {"models": []}
+    assert scrub_response("/api/version", 200, b"untouched") == b"untouched"
+
+
+def test_scrub_modelfile_adapter_and_relative_from():
+    mf = "FROM llama3:8b\nADAPTER /home/u/lora.gguf\nSYSTEM use /tmp/x/ paths\n"
+    out = json.loads(scrub_response("/api/show", 200, body(modelfile=mf)))["modelfile"]
+    assert out == "FROM llama3:8b\n# ADAPTER (local path hidden)\nSYSTEM use /tmp/x/ paths\n"
