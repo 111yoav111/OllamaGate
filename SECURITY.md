@@ -1,8 +1,7 @@
 # Security
 
 OllamaGate puts a local Ollama server on the internet, so it is built to fail closed.
-This file describes the threat model and what is (and isn't) protected. It is
-updated after every build phase.
+This file describes the threat model and what is (and isn't) protected.
 
 ## Threat model
 
@@ -34,10 +33,15 @@ and the host machine itself.
   back. Query strings are dropped.
 - **Endpoint allowlist.** Only known inference endpoints are forwarded (exact
   method + path; model names reject `.`/`..` segments); model management is
-  denied (`403`) unless granted per device.
+  denied (`403`) unless granted per device. Granting it means full Ollama
+  admin for that device: it can pull, copy, push or delete *any* model, whatever
+  its model allowlist says. Only `insecure` (plain-HTTP) registries are refused,
+  since they would let a device make Ollama connect into your LAN.
 - **Resource limits.** Request headers must arrive within 15 s and bodies within
   120 s; bodies are capped at 20 MB; at most 512 connections in total and 32 per
-  IP; each device gets a small number of concurrent requests (default 2). Upstream
+  IP (IPv6 per /64); a TLS handshake must finish within 10 s; each device gets a
+  small number of concurrent requests (default 2; model lists and info have
+  their own pool and skip the queue). Upstream
   connect/read timeouts are enforced, and the upstream connection pool is bounded.
 - **Clean shutdown.** Active streams are terminated as soon as shutdown starts.
 - **TLS.** TLS 1.2 minimum with forward-secret AEAD ciphers only; plain HTTP is
@@ -49,8 +53,8 @@ and the host machine itself.
   CSP, `no-referrer`, `no-store`, and HSTS when TLS is on.
 - **Audit log.** Bounded ring buffer; long fields (paths, user agents) are truncated.
 - **Pairing.** Closed by default; while closed every `/pair*` route is an
-  ordinary `404`. A window lasts 5 minutes, pairs exactly one device and
-  self-destructs after 5 wrong attempts. Code: 8 Crockford base32 characters
+  ordinary `404`. A window lasts 5 minutes, pairs exactly one device and is
+  closed once its attempt budgets are used up (see below). Code: 8 Crockford base32 characters
   (40 bits, safe given the attempt cap and TTL). QR and link: separate 128-bit
   secrets carried in the URL **fragment**, so they never reach server logs or
   `Referer` headers; the page removes them from the address bar. Only SHA-256
@@ -112,9 +116,12 @@ and the host machine itself.
   hidden from listings (`/api/tags`, `/api/ps`, `/v1/models`; failing closed).
   Because Ollama's Go JSON decoder matches keys case-insensitively, request
   keys at the levels it decodes into structs must be plain lowercase - so
-  `"MODEL"` or `"ſtream"` can't smuggle a second value past the checks.
-  Token usage comes from Ollama's own counts, and interrupted streams are
-  charged an estimate so quotas can't be dodged by disconnecting early. A
+  `"MODEL"` or `"ſtream"` can't smuggle a second value past the checks, and
+  the body Ollama receives is always re-serialised from what was checked, so
+  duplicate keys can't either. `NaN`/`Infinity` are refused.
+  Token usage comes from Ollama's own counts; interrupted streams, and requests
+  abandoned before Ollama answered, are charged an estimate so quotas can't be
+  dodged by disconnecting early. A
   global priority queue (with a wait limit) keeps one device from
   monopolising Ollama.
 - **Auto-bans.** Repeated failed logins or pairing attempts ban the client
@@ -197,13 +204,22 @@ and the host machine itself.
 ## Known limitations
 
 - A self-signed certificate makes browsers warn; pin the fingerprint in API
-  clients or use Tailscale / a real certificate (Phase 5).
+  clients or use Tailscale / a real certificate.
 - On Windows, POSIX file modes don't apply; the key relies on the per-user
   profile directory ACLs.
 - All state is in memory by design: a restart revokes every device, and also
   resets usage counters and bans.
 - Token quotas are only as exact as Ollama's own counts; interrupted streams
-  are estimated (about one token per streamed chunk).
+  are estimated (about one token per streamed chunk). They bound output in
+  advance (`num_predict`) but charge input afterwards, and a device's
+  concurrent requests each see the same remaining quota, so a device can end
+  up somewhat over its quota.
+- `max_num_ctx` caps a context size the client *asks for*; requests that
+  don't ask get the model's own default (setting it on every request would
+  force model reloads).
+- In `cloudflare` mode every connection comes from the local tunnel, so the
+  per-IP connection cap can't apply; rate limits and bans still use the
+  client IP the tunnel reports.
 - The browser chat keeps conversations only in the page (lost on reload);
   nothing is stored server-side.
 - `ollamagate devices rotate` prints the new token on the owner's terminal; it

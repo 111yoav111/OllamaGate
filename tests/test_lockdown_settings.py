@@ -1,4 +1,4 @@
-"""Lockdown, runtime settings, usage rollup and dashboard data (Phase 3 backend)."""
+"""Lockdown, runtime settings, usage rollup and dashboard data."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def test_ua_summaries():
     assert summarize("") == "-"
 
 
-# ----- Phase 3 council regressions -------------------------------------------------------
+# ----- regressions -------------------------------------------------------------------
 
 
 def test_public_url_validation():

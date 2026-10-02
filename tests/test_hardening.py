@@ -1,4 +1,4 @@
-"""Regression tests for issues found in the Phase 1 council review."""
+"""Hardening regressions: proxy, streams, timeouts and connection limits."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Phase 4 end to end: limits, accounting and bans through the real server."""
+"""End to end: limits, accounting and bans through the real server."""
 
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ def test_priority_queue_end_to_end(gate_factory, client):
     assert served == ["high", "low"]
 
 
-# ----- Phase 4 council regressions --------------------------------------------------------
+# ----- regressions -------------------------------------------------------------------
 
 
 def test_anonymous_requests_cannot_get_a_client_banned(gate_factory, client):

@@ -1,4 +1,4 @@
-"""Regression tests for issues found in the Phase 2 council review."""
+"""Hardening regressions: escaping, the admin channel, pairing and device edge cases."""
 
 from __future__ import annotations
 

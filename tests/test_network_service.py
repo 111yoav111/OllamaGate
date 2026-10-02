@@ -1,4 +1,4 @@
-"""Phase 5: network modes, certificate reload, doctor, notifications and services."""
+"""Network modes, certificate reload, doctor, notifications and services."""
 
 from __future__ import annotations
 

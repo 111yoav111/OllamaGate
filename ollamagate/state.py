@@ -150,7 +150,7 @@ class RequestLogEntry:
 
 @dataclass
 class UsageDay:
-    """Daily usage rollup for one device (tokens are filled in from Phase 4)."""
+    """Daily usage rollup for one device."""
 
     requests: int = 0
     prompt_tokens: int = 0

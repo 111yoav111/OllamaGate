@@ -1,4 +1,4 @@
-"""Phase 4: body policy, token accounting, the priority gate and bans (unit tests)."""
+"""Body policy, token accounting, the priority gate and bans (unit tests)."""
 
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ def test_manual_ban_and_unban():
     assert bans.unban("203.0.113.9") and bans.banned("203.0.113.9") is None
 
 
-# ----- Phase 4 council regressions --------------------------------------------------------
+# ----- regressions ---------------------------------------------------------------------
 
 
 def test_repeating_the_same_credential_does_not_ban():

@@ -1,6 +1,6 @@
 name: CI
 
-# Kept cheap on purpose (private repo: Windows minutes count 2x, macOS 10x):
+# Kept cheap on purpose (Windows minutes count 2x, macOS 10x):
 # - runs on pushes to main/dev and on pull requests, not on every branch push
 # - skips docs-only changes
 # - Linux only by default; Windows/macOS via "Run workflow" (full_matrix)

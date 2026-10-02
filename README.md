@@ -66,9 +66,9 @@ and `ollamagate pair --cancel` to close an open window. Five wrong codes
 disable the code (the QR/link keep working); open a new window with
 `ollamagate pair`.
 
-> Set `server.public_url` (e.g. your Tailscale name) and `server.host` in
-> `config.toml`; otherwise pairing links point at `127.0.0.1`, which a phone
-> can't reach. `ollamagate pair` warns about this.
+> In `direct` and `letsencrypt` mode, set `server.public_url` and `server.host`
+> in `config.toml`; otherwise pairing links point at `127.0.0.1`, which a phone
+> can't reach (`ollamagate pair` warns about this). `tailscale` mode fills both in.
 
 ### Limits and bans
 
@@ -136,7 +136,7 @@ Pick one `network.mode` in `config.toml` (most recommended first):
 | `tailscale` | Tailscale on the PC and your devices, *HTTPS certificates* enabled in the Tailscale admin console | listens only on the PC's Tailscale IP, gets a real certificate with `tailscale cert` (renewed and hot-reloaded), and uses `https://<pc>.<tailnet>.ts.net:8443` in pairing links. Devices must be on your tailnet **and** paired. |
 | `cloudflare` | a `cloudflared` tunnel pointing at `http://127.0.0.1:8443` (with `[tls] mode = "off"`) | stays on loopback, trusts only the local tunnel for client IPs; set `server.public_url` to the tunnel hostname. No router ports opened. |
 | `letsencrypt` | your own domain, certbot, a router port-forward | uses `[tls] mode = "files"` with certbot's certificate (copy it to an owner-only place with a deploy hook); renewals are picked up without a restart. |
-| `direct` (default) | nothing | self-signed certificate: works, but every browser shows a warning. |
+| `direct` (default) | `server.host = "0.0.0.0"` (or a LAN IP), a router port-forward for internet access, and `server.public_url` | self-signed certificate: works, but every browser shows a warning. |
 
 ```toml
 [network]

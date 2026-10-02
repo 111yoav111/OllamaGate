@@ -291,7 +291,7 @@ async def test_live_update_on_new_device(n):
         assert await until(pilot, lambda: app._q("#device-table").row_count == n)
 
 
-# ----- Phase 3 council regressions -------------------------------------------------------
+# ----- regressions --------------------------------------------------------------------
 
 
 async def test_markup_in_device_name_cannot_crash_toasts():
@@ -395,7 +395,7 @@ async def test_unexpected_error_in_action_does_not_kill_tui(monkeypatch):
         assert app.is_running
 
 
-# ----- Phase 4: limits editor, bans --------------------------------------------------------
+# ----- limits editor, bans ------------------------------------------------------------
 
 
 async def test_limits_screen_edits_quotas_models_and_priority():

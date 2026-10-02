@@ -1,4 +1,4 @@
-"""Regression tests for issues found in the Phase 5 council review."""
+"""Hardening regressions: certificates, Tailscale, services, logging and notifications."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from ollamagate.state import State
 
 from .conftest import ThreadedServer
 from .fake_ollama import make_fake_ollama
-from .test_phase5 import fake_tailscale
+from .test_network_service import fake_tailscale
 
 
 def test_mismatched_renewal_keeps_serving_the_old_certificate(tmp_path):
