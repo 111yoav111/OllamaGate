@@ -11,7 +11,6 @@ only when something changed, so a flood of requests can't make it spin.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 from urllib.parse import urlsplit
@@ -69,9 +68,6 @@ class BanTable(DataTable):
     BINDINGS = [Binding("u", "app.unban", "Lift ban")]
 
 
-TOTP_UNLOCK_SECONDS = 300
-
-
 class GateTUI(App[None]):
     TITLE = "OllamaGate"
     CSS_PATH = "gate.tcss"
@@ -117,7 +113,6 @@ class GateTUI(App[None]):
         self._pairing: dict[str, Any] | None = None
         self._pairing_result: Text | None = None  # outcome of the last window we opened
         self._exit_requested = False
-        self._totp_until = 0.0  # monotonic time until which TOTP-gated actions are unlocked
         self.quit_confirmed = False  # True only when the owner chose to quit
 
     # ----- layout ------------------------------------------------------------------
@@ -479,14 +474,6 @@ class GateTUI(App[None]):
 
     def _run_admin(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         try:
-            if time.monotonic() >= self._totp_until and self.admin.needs_totp(
-                fn.__name__, inspect.signature(fn).bind(*args, **kwargs).arguments
-            ):
-                self.push_screen(
-                    InputScreen("TOTP code from your authenticator app (unlocks this for 5 minutes):"),
-                    self._unlock_totp,
-                )
-                return None
             result = fn(*args, **kwargs)
         except AdminError as exc:
             self.say(str(exc), severity="error")
@@ -497,17 +484,6 @@ class GateTUI(App[None]):
             return None
         self.refresh_all()
         return result
-
-    def _unlock_totp(self, code: str | None) -> None:
-        if not code:
-            return
-        try:
-            self.admin.check_totp(code.strip())
-        except AdminError as exc:
-            self.say(str(exc), severity="error")
-            return
-        self._totp_until = time.monotonic() + TOTP_UNLOCK_SECONDS
-        self.say("Unlocked for 5 minutes - repeat the action.")
 
     def _with_device(self, action: Callable[[dict[str, Any]], None]) -> None:
         device_id = self._selected_device_id()
