@@ -40,7 +40,11 @@ def test_claim_sets_strict_secure_host_cookie(gate):
 @pytest.mark.parametrize("path", ["/app", "/app/app.js", "/app/app.css", "/app/session"])
 def test_app_requires_session(gate, client, path):
     r = client.get(gate.url + path)
-    assert r.status_code == 401 and r.json() == {"error": "unauthorized"}
+    if path == "/app":  # people land here after a restart or sign-out: tell them what to do
+        assert r.status_code == 401 and "text/html" in r.headers["content-type"] and "open pairing" in r.text
+        assert "<script" not in r.text
+    else:
+        assert r.status_code == 401 and r.json() == {"error": "unauthorized"}
     # A bearer token doesn't open the browser app either (it's cookie-only).
     assert client.get(gate.url + path, headers={"Authorization": f"Bearer {gate.token}"}).status_code == 401
 

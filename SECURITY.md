@@ -129,8 +129,8 @@ and the host machine itself.
   `SameSite=Strict`, `__Host-` session cookie holding its device token. Cookie-authenticated
   requests must also carry a CSRF header (an HMAC of the token under a
   per-process key), which cross-site pages can neither read nor forge; there is
-  no CORS. `/app` and its assets require a valid session (generic `401`
-  otherwise), have a strict CSP with no external resources, and render model
+  no CORS. `/app` and its assets require a valid session (`401` otherwise;
+  `/app` itself explains how to pair again), have a strict CSP with no external resources, and render model
   output as text only. Revoking the device ends the session.
 - **Network modes.** In `tailscale` mode OllamaGate binds only to the Tailscale
   address (never the LAN or `0.0.0.0`), so a device needs tailnet access *and*

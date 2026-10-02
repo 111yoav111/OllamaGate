@@ -31,6 +31,17 @@ _ASSETS = {
 }
 
 
+# What a browser sees at /app without a session: after a restart (all state is
+# in memory), after signing out, or when it was never paired. A bare JSON 401
+# would leave people stuck.
+SIGNED_OUT_PAGE = b"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>OllamaGate</title><h1>Not signed in</h1>
+<p>This browser isn't paired with OllamaGate any more (the server was restarted,
+the device was removed, or you signed out).</p>
+<p>Ask the owner to open pairing, then use the new code, QR or link.</p>
+"""
+
+
 def session_cookie_header(token: str, max_age: int) -> str:
     # Always Secure: even with tls.mode = "off" the page is reached over HTTPS
     # (a tunnel) or on localhost, which browsers treat as a secure context.
@@ -54,6 +65,8 @@ def register_app_routes(
 
     async def page(request: Request) -> Response:
         if state.lockdown or session_device(request) is None:
+            if request.url.path == "/app" and not state.lockdown:
+                return Response(SIGNED_OUT_PAGE, status_code=401, media_type="text/html; charset=utf-8")
             return unauthorized()
         body, ctype = assets[request.url.path]
         return Response(body, media_type=ctype, headers={"Content-Security-Policy": APP_CSP})

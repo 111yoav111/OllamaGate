@@ -120,5 +120,5 @@
     await api("/app/logout", { method: "POST" });
     location.replace("/app");
   });
-  start();
+  start().catch(() => status("Can't reach the server. Check the connection and reload."));
 })();
