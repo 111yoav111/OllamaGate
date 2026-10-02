@@ -376,13 +376,18 @@ def create_app(
             return reject_limit(
                 device.id, ip, "tokens_month", "monthly token quota used up", seconds_until_next_month()
             )
-        if len(state.device_streams(device.id)) >= limits.max_concurrent:
+        # Model lists and info don't use the GPU: they get their own concurrency pool
+        # and skip the queue, so a client's model picker never waits behind chats.
+        generates = path in ACCOUNTED_ENDPOINTS
+        busy = sum(1 for s in state.device_streams(device.id) if (s.path in ACCOUNTED_ENDPOINTS) == generates)
+        if busy >= limits.max_concurrent:
             return reject_limit(device.id, ip, "concurrency", "too many concurrent requests", 1)
         started = time.monotonic()
         stream = state.register_stream(device.id, method, path, auth.hash_token(token or ""))
         ticket = Ticket()  # the priority-gate slot, released in finish()
         counter: UsageCounter | None = None
         body = b""
+        sent = False  # the request went to Ollama
 
         def finish(outcome_name: str, status: int, bytes_out: int) -> None:
             gate.release(ticket)  # no-op if no slot was granted
@@ -392,6 +397,14 @@ def create_app(
                 state.add_usage(device.id, prompt_tokens=used.prompt_tokens, completion_tokens=used.completion_tokens)
                 if not used.exact:
                     state.audit_noisy("usage_estimated", ip=ip, device_id=device.id, tokens=used.total, outcome=outcome_name)
+            elif counter is None and sent and outcome_name in ("client_disconnect", "killed") and path in ACCOUNTED_ENDPOINTS:
+                # Abandoned before Ollama answered (e.g. stream:false, or during prompt
+                # processing): charge the prompt, about 4 bytes a token, at most a context.
+                estimate = len(body) // 4
+                if limits.max_num_ctx:
+                    estimate = min(estimate, limits.max_num_ctx)
+                state.add_usage(device.id, prompt_tokens=estimate)
+                state.audit_noisy("usage_estimated", ip=ip, device_id=device.id, tokens=estimate, outcome=outcome_name)
             state.log_request(
                 RequestLogEntry(
                     ts=time.time(),
@@ -456,10 +469,11 @@ def create_app(
             # 8. Wait for a slot at Ollama (higher priority first), but not forever:
             #    under constant high-priority load a low-priority request gives up.
             try:
-                await asyncio.wait_for(
-                    race_kill(gate.acquire(limits.priority, ticket), stream, request.receive),
-                    config.server.queue_timeout,
-                )
+                if generates:
+                    await asyncio.wait_for(
+                        race_kill(gate.acquire(limits.priority, ticket), stream, request.receive),
+                        config.server.queue_timeout,
+                    )
             except asyncio.TimeoutError:
                 state.audit_noisy("limit_queue", ip=ip, device_id=device.id)
                 finish("rejected", 503, 0)
@@ -470,6 +484,7 @@ def create_app(
             upstream_request = http.build_request(
                 method, path, content=body or None, headers=build_upstream_headers(request.headers)
             )
+            sent = True
             try:
                 upstream = await open_upstream(http, upstream_request, stream, request.receive)
             except httpx.HTTPError as exc:

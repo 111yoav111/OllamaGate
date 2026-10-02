@@ -88,7 +88,25 @@ def test_per_device_concurrency_limit(gate, client):
                        json={"model": "m", "fake_chunks": 100, "fake_delay": 0.05}) as r:
         lines = r.iter_lines()
         next(lines)
-        assert httpx.get(gate.url + "/api/tags", headers=bearer(gate.token)).status_code == 429
+        assert httpx.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m"}).status_code == 429
+        # Model lists have their own pool and skip the queue: pickers keep working mid-chat.
+        assert httpx.get(gate.url + "/api/tags", headers=bearer(gate.token)).status_code == 200
+
+
+def test_abandoned_request_is_charged_for_its_prompt(gate, client):
+    """stream:false sends nothing until the end; leaving before then must still cost tokens."""
+    import threading
+
+    set_limits(gate, max_num_ctx=100)
+    body = {"model": "m", "stream": False, "fake_first_delay": 5, "messages": [{"content": "x" * 2000}]}
+    t = threading.Thread(target=lambda: client.post(gate.url + "/api/chat", headers=bearer(gate.token), json=body))
+    t.start()
+    assert wait_for(lambda: len(gate.recorder.requests) == 1)  # Ollama is working on it
+    gate.call(lambda: gate.state.kill_device_streams(gate.device.id, "kicked"))
+    t.join(5)
+    assert wait_for(lambda: gate.state.usage_today(gate.device.id).prompt_tokens == 100)  # capped at a context
+    bad = client.post(gate.url + "/api/chat", headers=bearer(gate.token), json={"model": "m", "options": "x"})
+    assert bad.status_code == 400 and gate.state.usage_today(gate.device.id).prompt_tokens == 100  # never sent
 
 
 def test_model_allowlist_end_to_end(gate, client):
