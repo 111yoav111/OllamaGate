@@ -11,6 +11,7 @@ in memory: when the service restarts, devices must pair again.
 
 from __future__ import annotations
 
+import getpass
 import os
 import shlex
 import subprocess
@@ -31,6 +32,12 @@ class ServicePlan:
     deactivate: list[list[str]]
 
 
+def _config_dir_env() -> str | None:
+    """OLLAMAGATE_CONFIG_DIR as an absolute path, so the service uses the same directory as this CLI."""
+    value = os.environ.get("OLLAMAGATE_CONFIG_DIR")
+    return str(Path(value).resolve()) if value else None
+
+
 def _serve_command(config_path: Path | None, python: str | None = None) -> list[str]:
     cmd = [python or sys.executable, "-m", "ollamagate", "serve", "--no-tui"]
     if config_path is not None:
@@ -48,6 +55,9 @@ def _systemd_exec(cmd: list[str]) -> str:
 def plan(config_path: Path | None = None, platform: str = sys.platform, home: Path | None = None) -> ServicePlan:
     home = home or Path.home()
     cmd = _serve_command(config_path)
+    config_dir = _config_dir_env()
+    if config_dir and platform != "win32":
+        cmd = ["/usr/bin/env", f"OLLAMAGATE_CONFIG_DIR={config_dir}", *cmd]
     if platform.startswith("linux"):
         unit = f"""[Unit]
 Description=OllamaGate - secure pairing proxy for Ollama
@@ -73,7 +83,7 @@ WantedBy=default.target
                 ["systemctl", "--user", "daemon-reload"],
                 ["systemctl", "--user", "enable", "--now", SERVICE_NAME],
                 # Keep user services running when you're logged out.
-                ["loginctl", "enable-linger", os.environ.get("USER", "")],
+                ["loginctl", "enable-linger", getpass.getuser()],
             ],
             deactivate=[["systemctl", "--user", "disable", "--now", SERVICE_NAME]],
         )
@@ -116,7 +126,8 @@ WantedBy=default.target
         win_cmd = _serve_command(config_path, str(pythonw) if pythonw.exists() else None)
         appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
         path = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "OllamaGate.cmd"
-        script = "@echo off\r\nstart \"OllamaGate\" /min " + subprocess.list2cmdline(win_cmd) + "\r\n"
+        env_line = f'set "OLLAMAGATE_CONFIG_DIR={config_dir}"\r\n' if config_dir else ""
+        script = "@echo off\r\n" + env_line + "start \"OllamaGate\" /min " + subprocess.list2cmdline(win_cmd) + "\r\n"
         return ServicePlan(
             path=path,
             content=script,

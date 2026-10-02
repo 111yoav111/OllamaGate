@@ -143,7 +143,7 @@ def serve(
     async def main() -> None:
         try:
             control = await start_control_server(config.config_dir, admin.dispatch)
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
         server_task = asyncio.ensure_future(server.serve(sockets=[sock]))
@@ -197,7 +197,8 @@ async def _maintenance(config: Config, server: Any, tls_info: Any) -> None:
     last_renewal = time.monotonic()
     while True:
         await asyncio.sleep(60)
-        if config.network.mode == "tailscale" and time.monotonic() - last_renewal > 86400:
+        uses_tailscale_cert = config.tls.cert_file == str(config.config_dir / "tls" / "tailscale.crt")
+        if uses_tailscale_cert and time.monotonic() - last_renewal > 86400:
             last_renewal = time.monotonic()
             from .network import tailscale_cert, tailscale_info
 
@@ -267,7 +268,7 @@ def pair(
     if info.get("code"):
         typer.secho("  Pairing code:  ", nl=False)
         typer.secho(info["code"], bold=True)
-        typer.echo("  Open <server>/pair on the device and type it in.\n")
+        typer.echo(f"  Open {info['pair_url']} on the device and type it in.\n")
     if info.get("qr_url"):
         typer.echo(qr.render_text(info["qr_url"]))
         typer.echo("  Scan with the phone's camera.\n")

@@ -51,7 +51,7 @@ Press `P` in the TUI or run `ollamagate pair` in another terminal.
 `ollamagate pair` shows three ways to pair, valid for 5 minutes and for one
 device only:
 
-- a **code** like `8E9T-RDQF` to type in at `https://<your-server>/pair`,
+- a **code** like `8E9T-RDQF` to type in at the printed address (`https://<your-server>:8443/pair`),
 - a **QR code** to scan with a phone,
 - a **link** to open on the device.
 

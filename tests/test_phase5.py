@@ -242,3 +242,13 @@ def test_service_install_dry_run_writes_nothing(monkeypatch, tmp_path):
     r = CliRunner().invoke(cli, ["service", "install", "--dry-run"])
     assert r.exit_code == 0 and "Would write" in r.output and "$ " in r.output
     assert not any(tmp_path.rglob("*.service")) and not any(tmp_path.rglob("*.plist"))
+
+
+def test_service_keeps_the_config_dir(tmp_path, monkeypatch):
+    from ollamagate import service
+
+    monkeypatch.setenv("OLLAMAGATE_CONFIG_DIR", str(tmp_path / "og"))
+    linux = service.plan(None, platform="linux", home=tmp_path)
+    assert f"/usr/bin/env OLLAMAGATE_CONFIG_DIR={tmp_path / 'og'}" in linux.content
+    assert linux.activate[-1][-1]  # enable-linger gets a real user name
+    assert f'set "OLLAMAGATE_CONFIG_DIR={tmp_path / "og"}"' in service.plan(None, platform="win32", home=tmp_path).content

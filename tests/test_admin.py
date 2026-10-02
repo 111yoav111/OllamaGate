@@ -149,6 +149,7 @@ def test_cli_pair_no_wait_then_claim(admin_gate, client):
 def test_cli_pair_single_method(admin_gate):
     r = run_cli("pair", "--no-wait", "--method", "code")
     assert r.exit_code == 0 and "/pair#t=" not in r.output
+    assert "<server>" not in r.output and "/pair on the device" in r.output
     assert run_cli("pair", "--method", "fax", "--no-wait").exit_code == 1
 
 

@@ -161,6 +161,8 @@ def check_tls(config: Config) -> list[Finding]:
     else:
         findings.append(Finding("ok", f"TLS certificate valid for {days} more days"))
     host = urlsplit(config.base_url).hostname or ""
+    if config.network.mode == "tailscale" and not config.server.public_url:
+        host = ""  # filled in from Tailscale at start-up, matching the certificate it issues
     try:
         sans = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         names = [n.lower() for n in sans.get_values_for_type(x509.DNSName)]

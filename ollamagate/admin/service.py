@@ -328,6 +328,7 @@ class Admin:
             "window_id": secrets_.window_id,
             "expires_at": secrets_.expires_at,
             "code": secrets_.code_display,
+            "pair_url": f"{self.config.base_url}/pair",
             "qr_url": secrets_.qr_url,
             "link_url": secrets_.link_url,
             "fingerprint": self.fingerprint,
