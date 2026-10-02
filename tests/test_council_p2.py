@@ -182,12 +182,41 @@ def test_client_rejects_impostor_without_proof(tmp_path):
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
-    (rdir / "admin.json").write_text(json.dumps({"transport": "tcp", "port": port, "secret": "s"}))
+    secret = "s" * 43
+    (rdir / "admin.json").write_text(json.dumps({"transport": "tcp", "port": port, "secret": secret}))
+    received: list[bytes] = []
 
     def impostor():
         conn, _ = listener.accept()
-        conn.recv(65536)
-        conn.sendall(json.dumps({"ok": True, "result": {"qr_url": "https://evil"}}).encode() + b"\n")
+        conn.sendall(b'{"challenge": "' + b"c" * 32 + b'"}\n')
+        received.append(conn.recv(65536))
+        nonce = json.loads(received[0])["nonce"]
+        forged = ipc._mac("guess", "server", "c" * 32, nonce)
+        conn.sendall(json.dumps({"ok": True, "result": {"qr_url": "https://evil"}, "proof": forged}).encode() + b"\n")
+        conn.close()
+
+    t = threading.Thread(target=impostor, daemon=True)
+    t.start()
+    with pytest.raises(ipc.NotRunning, match="prove"):
+        ipc.ControlClient(tmp_path).call("pairing.open")
+    t.join(5)
+    listener.close()
+    # The secret itself never crossed the channel, so the impostor learned nothing.
+    assert received and secret.encode() not in received[0]
+
+
+def test_impostor_without_challenge_is_refused(tmp_path):
+    rdir = ipc.run_dir(tmp_path)
+    rdir.mkdir(parents=True)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    (rdir / "admin.json").write_text(json.dumps({"transport": "tcp", "port": port, "secret": "s" * 43}))
+
+    def impostor():
+        conn, _ = listener.accept()
+        conn.sendall(json.dumps({"ok": True, "result": "x"}).encode() + b"\n")
         conn.close()
 
     t = threading.Thread(target=impostor, daemon=True)
@@ -195,6 +224,38 @@ def test_client_rejects_impostor_without_proof(tmp_path):
     with pytest.raises(ipc.NotRunning, match="prove"):
         ipc.ControlClient(tmp_path).call("pairing.open")
     listener.close()
+
+
+def test_replayed_request_and_old_style_secret_are_refused(tmp_path):
+    async def run():
+        server = await ipc.start_control_server(tmp_path, lambda c, a: asyncio.sleep(0))
+        info = json.loads((ipc.run_dir(tmp_path) / "admin.json").read_text())
+
+        async def connect():
+            if info["transport"] == "unix":
+                return await asyncio.open_unix_connection(info["path"])
+            return await asyncio.open_connection("127.0.0.1", info["port"])
+
+        reader, writer = await connect()
+        challenge = json.loads(await reader.readline())["challenge"]
+        nonce = "n" * 32
+        request = {"nonce": nonce, "auth": ipc._mac(info["secret"], "client", challenge, nonce), "cmd": "ping"}
+        writer.write(json.dumps(request).encode() + b"\n")
+        first = json.loads(await reader.readline())
+        writer.write(json.dumps(request).encode() + b"\n")
+        replay = json.loads(await reader.readline())
+        writer.close()
+        reader, writer = await connect()
+        await reader.readline()
+        writer.write(json.dumps({"secret": info["secret"], "nonce": nonce, "cmd": "ping"}).encode() + b"\n")
+        old_style = json.loads(await reader.readline())
+        writer.close()
+        await server.close()
+        return first, replay, old_style
+
+    first, replay, old_style = asyncio.run(run())
+    assert first["ok"] and first["result"] == "pong"
+    assert replay == old_style == {"ok": False, "error": "unauthorized"}
 
 
 def test_non_ascii_secret_and_nested_json(tmp_path):
@@ -205,6 +266,7 @@ def test_non_ascii_secret_and_nested_json(tmp_path):
             reader, writer = await asyncio.open_unix_connection(info["path"])
         else:
             reader, writer = await asyncio.open_connection("127.0.0.1", info["port"])
+        await reader.readline()  # the challenge
         writer.write(b"[" * 5000 + b"\n")
         first = json.loads(await reader.readline())
         writer.write(json.dumps({"secret": "sécret", "nonce": "n", "cmd": "x"}).encode() + b"\n")

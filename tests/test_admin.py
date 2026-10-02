@@ -174,6 +174,7 @@ def test_oversized_message_closes_connection(admin_gate):
     else:
         s = socket.create_connection(("127.0.0.1", info["port"]))
     s.settimeout(5)
+    assert b"challenge" in s.recv(200)
     try:
         s.sendall(b"x" * (ipc.MAX_MESSAGE + 10) + b"\n")
     except OSError:

@@ -77,9 +77,11 @@ and the host machine itself.
   rest are only counted, so real events aren't flushed out.
 - **Admin channel.** CLI administration uses a `0600` Unix socket in a `0700`
   directory (Windows: `127.0.0.1` on a random port) *and* a 256-bit secret from
-  an owner-only file, compared in constant time. Replies carry an HMAC proof over
-  a client nonce, so a process squatting on a stale port can't feed the CLI fake
-  pairing links. The run directory must be a real, owner-owned directory (no
+  an owner-only file. The secret never crosses the channel: the server sends a
+  fresh challenge per connection, each request answers it with an HMAC over a
+  single-use nonce, and each reply carries the server's own HMAC. A process
+  squatting on a stale port learns nothing and can't feed the CLI fake pairing
+  links. The run directory must be a real, owner-owned directory (no
   symlinks). A second instance using the same config directory is refused.
   There is no remote admin API. Admin actions are audited. Device views never
   include token hashes.
