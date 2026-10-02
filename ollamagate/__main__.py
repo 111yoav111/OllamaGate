@@ -536,9 +536,9 @@ def devices_ban_ip(
     config_path: Optional[Path] = ConfigOption,
     seconds: Optional[int] = typer.Option(None, help="ban duration (default: until lifted)"),
 ) -> None:
-    """Ban the IP a device last connected from."""
+    """Ban the IP a device last connected from, and suspend the device."""
     r = _call(config_path, "devices.ban_ip", ref=device_id, seconds=seconds)
-    typer.echo(f"Banned {safe(r['key'])}; {r['streams_killed']} request(s) cut.")
+    typer.echo(f"Banned {safe(r['key'])} and suspended the device; {r['streams_killed']} request(s) cut.")
 
 
 bans_cli = typer.Typer(no_args_is_help=True, help="View and manage IP bans")

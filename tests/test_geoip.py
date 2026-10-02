@@ -28,6 +28,8 @@ def test_lookup_and_rules():
     assert not g.permits("9.9.9.9")  # unknown country fails an allowlist
     for local in ("127.0.0.1", "10.0.0.1", "100.64.1.1", "::1", "fd00::1"):
         assert g.permits(local)  # LAN, loopback, Tailscale are never filtered
+    assert g.country("::ffff:8.8.8.8") == "US" and not g.permits("::ffff:8.8.8.8")  # dual-stack socket
+    assert g.permits("::ffff:127.0.0.1")
     g = geo(deny=["US"])
     assert not g.permits("8.8.8.8") and g.permits("85.214.1.1") and g.permits("9.9.9.9")
     assert geo().permits("8.8.8.8")

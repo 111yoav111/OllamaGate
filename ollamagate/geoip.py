@@ -12,6 +12,15 @@ from typing import Any
 from .config import GeoIPConfig
 
 
+def _address(ip: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse ``ip``; "::ffff:1.2.3.4" (IPv4 on a dual-stack socket) counts as 1.2.3.4."""
+    try:
+        addr = ipaddress.ip_address(ip or "")
+    except ValueError:
+        return None
+    return getattr(addr, "ipv4_mapped", None) or addr
+
+
 class GeoIP:
     def __init__(self, reader: Any, allow: list[str], deny: list[str]) -> None:
         self.reader = reader  # anything with .get(ip) -> record, like maxminddb.Reader
@@ -20,11 +29,8 @@ class GeoIP:
 
     def country(self, ip: str | None) -> str | None:
         """ISO 3166 code ("DE"), or None for private/unknown addresses."""
-        try:
-            addr = ipaddress.ip_address(ip or "")
-        except ValueError:
-            return None
-        if not addr.is_global:
+        addr = _address(ip)
+        if addr is None or not addr.is_global:
             return None
         try:
             record = self.reader.get(str(addr))
@@ -39,11 +45,11 @@ class GeoIP:
         address the database can't place fails an allowlist (fail closed)."""
         if not (self.allow or self.deny):
             return True
-        try:
-            if not ipaddress.ip_address(ip or "").is_global:
-                return True
-        except ValueError:
+        addr = _address(ip)
+        if addr is None:
             return not self.allow
+        if not addr.is_global:
+            return True
         code = self.country(ip)
         if code in self.deny:
             return False

@@ -674,7 +674,7 @@ class GateTUI(App[None]):
                 self.say("This device has no known IP yet", severity="warning")
                 return
             self.push_screen(
-                ConfirmScreen(f"Ban {d['last_ip']} (last IP of {t(d['name']).plain}) until you lift it?"),
+                ConfirmScreen(f"Ban {d['last_ip']} until you lift it and suspend {t(d['name']).plain} (its last IP)?"),
                 lambda ok: ok and self._run_admin(self.admin.ban_device_ip, d["id"]),
             )
 

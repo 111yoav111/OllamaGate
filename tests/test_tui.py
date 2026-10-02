@@ -433,6 +433,7 @@ async def test_ban_device_ip_and_unban_from_bans_tab():
         await pilot.press("y")
         await pilot.pause()
         assert admin.state.bans.banned("203.0.113.7") is not None
+        assert admin.list_devices()[0]["status"] == "suspended"  # or its valid token would walk right back in
         await pilot.press("5")
         await pilot.pause()
         assert app._q("#ban-table").row_count == 1

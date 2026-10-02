@@ -100,7 +100,7 @@ ollamagate devices rename <id> "Work laptop"
 ollamagate devices notes <id> "Anna's phone, replaced 2026-09"
 ollamagate devices model-management <id> --allow|--deny   # pull/push/delete/create/copy
 ollamagate devices limits <id> [--tokens-per-day N --allowed-models llama3,qwen2 --priority high ...]
-ollamagate devices ban-ip <id>
+ollamagate devices ban-ip <id>            # ban its last IP and suspend it
 ollamagate bans list|add <ip>|remove <ip>
 ollamagate devices suspend|resume <id>
 ollamagate devices kick <id>             # end its active requests now

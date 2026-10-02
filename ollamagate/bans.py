@@ -37,9 +37,10 @@ class Ban:
 
 def _is_loopback(ip: str | None) -> bool:
     try:
-        return ip is not None and ipaddress.ip_address(ip).is_loopback
+        addr = ipaddress.ip_address(ip) if ip is not None else None
     except ValueError:
         return False
+    return addr is not None and (getattr(addr, "ipv4_mapped", None) or addr).is_loopback
 
 
 class BanList:

@@ -288,7 +288,12 @@ class Admin:
         device = self._device(ref)
         if not device.last_ip:
             raise AdminError("this device has no known IP yet")
-        return self.add_ban(device.last_ip, seconds, reason=f"banned from device {device.id[:8]}")
+        result = self.add_ban(device.last_ip, seconds, reason=f"banned from device {device.id[:8]}")
+        # Bans let valid credentials through (so NAT neighbours keep working), so the
+        # device itself must be suspended too, or it would just reconnect.
+        if device.status is DeviceStatus.ACTIVE:
+            self.suspend(device.id)
+        return result
 
     # ----- pairing ---------------------------------------------------------------
 
