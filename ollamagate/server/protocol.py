@@ -15,6 +15,7 @@ from typing import Sequence
 
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from ..ratelimit import client_key
 from .netutil import IPNetwork, is_trusted
 from .tls import peer_cert_fingerprint
 
@@ -37,11 +38,12 @@ def make_guarded_protocol(
             ip = self.client[0] if self.client else None
             # Behind a tunnel every connection comes from the proxy; don't cap it.
             if ip is not None and not is_trusted(ip, trusted):
-                if per_ip[ip] >= max_connections_per_ip:
+                key = client_key(ip)  # IPv6 per /64, like bans: one client can't rotate addresses
+                if per_ip[key] >= max_connections_per_ip:
                     transport.close()
                     return
-                per_ip[ip] += 1
-                self._counted_ip = ip
+                per_ip[key] += 1
+                self._counted_ip = key
             self._arm_header_timer()
             cert_fp = peer_cert_fingerprint(transport.get_extra_info("ssl_object"))
             if cert_fp is not None:

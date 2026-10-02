@@ -227,3 +227,31 @@ def test_rotation_without_grace_is_immediate(gate, client):
     gate.call(lambda: gate.state.rotate_token(gate.device.id, auth.hash_token(new), "p"))
     assert client.get(gate.url + "/api/tags", headers=bearer(gate.token)).status_code == 401
     assert client.get(gate.url + "/api/tags", headers=bearer(new)).status_code == 200
+
+
+def test_silent_tls_client_is_dropped(fake_ollama, tmp_path, monkeypatch):
+    """No ClientHello means no connection_made, so only the handshake timeout bounds it."""
+    from ollamagate.config import Config
+    from ollamagate.server import runner, tls
+    from ollamagate.server.app import create_app
+    from ollamagate.state import State
+
+    from .conftest import ThreadedServer
+
+    monkeypatch.setattr(runner, "TLS_HANDSHAKE_TIMEOUT", 0.5)
+    cfg = Config()
+    cfg.config_dir = tmp_path
+    cfg.ollama.url = fake_ollama[0].url
+    cert, key = tls.ensure_self_signed(tmp_path / "tls", ["127.0.0.1"])
+    state = State()
+    server = ThreadedServer(
+        server=runner.build_server(cfg, create_app(cfg, state), state, runner.TLSInfo(cert, key, ""))
+    ).start()
+    try:
+        with socket.create_connection(_host_port(server.url.replace("https", "http")), timeout=5) as s:
+            start = time.monotonic()
+            assert s.recv(1) == b""  # closed by the server
+            assert time.monotonic() - start < 3
+    finally:
+        server.stop()
+

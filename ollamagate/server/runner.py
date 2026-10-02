@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
 import logging
 import signal
 import threading
@@ -22,6 +24,10 @@ from .protocol import make_guarded_protocol
 log = logging.getLogger("ollamagate")
 
 GRACEFUL_SHUTDOWN_SECONDS = 5
+# Our per-IP cap and header deadline start only once TLS is up (asyncio calls
+# connection_made after the handshake), so a client that never sends a
+# ClientHello is only bounded by this. asyncio's default is 60 s.
+TLS_HANDSHAKE_TIMEOUT = 10.0
 
 
 @dataclass
@@ -53,6 +59,17 @@ class GateServer(uvicorn.Server):
         super().__init__(config)
         self.gate_state = state
 
+    async def startup(self, sockets: list | None = None) -> None:  # type: ignore[override]
+        raise_fd_limit()
+        loop = asyncio.get_running_loop()
+        if self.config.ssl is not None:
+            # uvicorn doesn't expose ssl_handshake_timeout; pass it to the create_server it calls.
+            loop.create_server = functools.partial(loop.create_server, ssl_handshake_timeout=TLS_HANDSHAKE_TIMEOUT)  # type: ignore[method-assign]
+        try:
+            await super().startup(sockets)
+        finally:
+            loop.__dict__.pop("create_server", None)
+
     async def shutdown(self, sockets: list | None = None) -> None:  # type: ignore[override]
         self.gate_state.kill_all_streams("server shutting down")
         await super().shutdown(sockets)
@@ -76,6 +93,19 @@ class GateServer(uvicorn.Server):
         finally:
             for sig, handler in original.items():
                 signal.signal(sig, handler)
+
+
+def raise_fd_limit() -> None:
+    """Use the hard file-descriptor limit (often 1024 soft) so idle sockets can't starve us."""
+    try:
+        import resource
+    except ImportError:  # Windows
+        return
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = hard if hard != resource.RLIM_INFINITY else 65536
+    if soft != resource.RLIM_INFINITY and soft < target:
+        with contextlib.suppress(ValueError, OSError):
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(target, 65536), hard))
 
 
 def build_uvicorn_config(
