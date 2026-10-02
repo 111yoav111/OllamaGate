@@ -83,6 +83,22 @@ and the host machine itself.
   symlinks). A second instance using the same config directory is refused.
   There is no remote admin API. Admin actions are audited. Device views never
   include token hashes.
+- **Admin TOTP (opt-in, `ollamagate totp setup`).** Actions that grant access
+  or weaken protection - opening pairing, rotating a token, resuming a device,
+  changing limits or expiry, granting model management, lifting a ban or
+  lockdown, changing settings - need a code from an authenticator app (RFC 6238,
+  SHA-1/30 s/6 digits, one step of drift, 160-bit secret, implemented on the
+  standard library). Protective actions (revoke, suspend, kick, ban, lockdown on)
+  never wait for a code. Each code works once, and 5 wrong codes in a row lock
+  the gated actions for 5 minutes; failures are audited. The CLI asks for a
+  code per command; the TUI unlocks for 5 minutes after a correct code. Setup
+  only saves the key after one code from the app checks out, so you can't
+  lock yourself out by mis-scanning. A damaged key file stops the server from
+  starting instead of silently turning TOTP off.
+  **Limit:** the secret is stored in `totp.key` (`0600`) next to the config,
+  so it stops someone at your unlocked terminal or holding only the admin
+  socket, not malware running as your user (it can read the file, or edit it
+  away and wait for a restart).
 - **Admin TUI.** Runs inside the server process and acts only through the same
   audited admin service as the CLI; it has no network surface. Client-supplied
   text (device names, user agents, paths, model names) is rendered as literal
@@ -194,10 +210,6 @@ and the host machine itself.
 - **Supply chain.** Dependencies are pinned with hashes (`requirements.lock`) and
   audited with `pip-audit` in CI.
 
-## Not yet protected (planned)
-
-- TOTP for admin actions.
-
 ## Known limitations
 
 - A self-signed certificate makes browsers warn; pin the fingerprint in API
@@ -215,7 +227,8 @@ and the host machine itself.
 - The admin channel writes two runtime files (`run/admin.json`, `run/admin.sock`)
   that are removed on shutdown. They exist only because CLI commands need to
   reach the in-memory state of the running server.
-- Anyone who can act as your OS user can administer OllamaGate (by design).
+- Anyone who can act as your OS user can administer OllamaGate (by design);
+  admin TOTP doesn't change that, see above.
 - On Windows the admin secret file relies on the per-user profile ACLs; keep the
   config directory in your profile (the default `%APPDATA%`).
 

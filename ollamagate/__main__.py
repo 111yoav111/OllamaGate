@@ -37,10 +37,19 @@ def _load(config_path: Optional[Path]) -> Config:
 def _call(config_path: Optional[Path], cmd: str, **args: Any) -> Any:
     from .admin.ipc import AdminError, ControlClient, NotRunning
 
+    from .admin.service import TOTP_REQUIRED
+
     config = _load(config_path)
     try:
         with ControlClient(config.config_dir) as client:
-            return client.call(cmd, **args)
+            try:
+                return client.call(cmd, **args)
+            except AdminError as exc:
+                if str(exc) != TOTP_REQUIRED:
+                    raise
+                client.close()  # the server drops idle connections; reconnect after typing
+                code = typer.prompt("TOTP code", err=True)
+                return client.call(cmd, **args, totp=code)
     except NotRunning as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(3)
@@ -122,7 +131,14 @@ def serve(
         client_ca = ClientCA()
     app = create_app(config, state, fingerprint=fingerprint, client_ca=client_ca)
     server = build_server(config, app, state, tls_info, own_logging=no_tui, client_ca=client_ca)
-    admin = Admin(state, config, fingerprint)
+    from . import totp
+
+    try:
+        verifier = totp.load(config.config_dir)
+    except (OSError, ValueError) as exc:  # fail closed: never drop the second factor silently
+        typer.secho(f"TOTP key error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    admin = Admin(state, config, fingerprint, totp=verifier)
     # Bind now, so "address in use" is reported before any TUI takes over the terminal.
     sock = server.config.bind_socket()
 
@@ -450,6 +466,7 @@ def status(config_path: Optional[Path] = ConfigOption) -> None:
         ("Active streams", d["active_streams"]),
         ("Requests", f"{d['requests_last_minute']}/min, {d['requests_today']} today"),
         ("Pairing", pairing_state),
+        ("Admin TOTP", "on" if d.get("admin_totp") else "off"),
     ]
     for label, value in rows:
         typer.echo(f"{label + ':':16} {safe(value)}")
@@ -632,6 +649,43 @@ def service_uninstall(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
         typer.echo(f"Removed {p.path}")
     if p.path is not None and p.path.suffix == ".service":
         _run_commands([["systemctl", "--user", "daemon-reload"]], dry_run)
+
+
+# ----- totp ----------------------------------------------------------------------------
+
+totp_cli = typer.Typer(no_args_is_help=True, help="Require an authenticator code for sensitive admin actions")
+cli.add_typer(totp_cli, name="totp")
+
+
+@totp_cli.command("setup")
+def totp_setup(
+    config_path: Optional[Path] = ConfigOption,
+    reset: bool = typer.Option(False, "--reset", help="Replace an existing TOTP key"),
+) -> None:
+    """Create a TOTP key, show it as a QR code and confirm one code (takes effect on restart)."""
+    import socket
+
+    from . import qr, totp
+
+    config = _load(config_path)
+    path = totp.key_path(config.config_dir)
+    if path.exists() and not reset:
+        typer.secho(f"TOTP is already set up ({path}). Use --reset to replace it.", fg=typer.colors.YELLOW)
+        raise typer.Exit(1)
+    secret = totp.new_secret()
+    uri = totp.provisioning_uri(secret, socket.gethostname()[:40] or "server")
+    typer.echo(qr.render_text(uri))
+    typer.echo(f"Scan it with an authenticator app, or enter this key by hand:\n  {secret}\n")
+    verifier = totp.Verifier(secret)
+    for _ in range(3):
+        if verifier.verify(typer.prompt("Code from the app")):
+            break
+        typer.secho("That code doesn't match; check the phone's clock.", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("Not saved.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    typer.echo(f"Saved {totp.save(config.config_dir, secret)}.")
+    typer.echo("Restart the server to enable it. Lost the phone? Delete that file and restart.")
 
 
 # ----- audit / doctor ------------------------------------------------------------------

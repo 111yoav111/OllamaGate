@@ -37,6 +37,13 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# Actions that grant access or weaken protection need a TOTP code when it is set
+# up; protective ones (revoke, suspend, kick, ban, lockdown on) never wait for one.
+TOTP_GATED = {
+    "open_pairing", "rotate", "resume", "set_limits", "set_expiry", "remove_ban", "set_setting",
+}
+TOTP_REQUIRED = "TOTP code required"
+
 EXPIRY_PRESETS = {"never": None, "1d": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 
 
@@ -97,10 +104,36 @@ def device_view(device: Device, state: State) -> dict[str, Any]:
 
 
 class Admin:
-    def __init__(self, state: State, config: Config, fingerprint: str | None) -> None:
+    def __init__(self, state: State, config: Config, fingerprint: str | None, totp: Any = None) -> None:
         self.state = state
         self.config = config
         self.fingerprint = fingerprint
+        self.totp = totp  # totp.Verifier, or None when TOTP isn't set up
+
+    # ----- TOTP ------------------------------------------------------------------
+
+    def needs_totp(self, method_name: str, args: dict[str, Any]) -> bool:
+        if self.totp is None:
+            return False
+        if method_name == "set_lockdown":
+            return args.get("on") is False
+        if method_name == "set_model_management":
+            return args.get("allowed") is True
+        return method_name in TOTP_GATED
+
+    def check_totp(self, code: object) -> None:
+        """Raise unless ``code`` is valid now (each code works once)."""
+        if self.totp is None:
+            return
+        if not code:
+            raise AdminError(TOTP_REQUIRED)
+        was_locked = self.totp.locked()
+        if self.totp.verify(code):
+            return
+        if was_locked:
+            raise AdminError("too many wrong TOTP codes; try again in a few minutes")
+        self._audit("totp_failed", locked=self.totp.locked())
+        raise AdminError("wrong TOTP code" + (" (locked for 5 minutes)" if self.totp.locked() else ""))
 
     # ----- helpers -------------------------------------------------------------
 
@@ -417,6 +450,7 @@ class Admin:
             "pairing": None if window is None else {"expires_at": window.expires_at, "attempts": window.attempts},
             "audit_suppressed": state.audit_suppressed,
             "bans": len(self.list_bans()),
+            "admin_totp": self.totp is not None,
         }
 
     # ----- logs --------------------------------------------------------------------
@@ -466,8 +500,12 @@ class Admin:
         if method_name is None:
             raise AdminError(f"unknown command {cmd!r}")
         method = getattr(self, method_name)
+        args = dict(args)
+        code = args.pop("totp", None)
         try:
-            inspect.signature(method).bind(**args)
+            bound = inspect.signature(method).bind(**args)
         except TypeError as exc:
             raise AdminError(f"bad arguments for {cmd}") from exc
+        if self.needs_totp(method_name, bound.arguments):
+            self.check_totp(code)
         return method(**args)

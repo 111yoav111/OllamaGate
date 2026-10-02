@@ -115,6 +115,16 @@ ollamagate settings set server.public_url https://my-pc.tailnet.ts.net:8443
 ollamagate doctor                        # checks Ollama binding, permissions, TLS
 ```
 
+Optionally, require an authenticator-app code for the actions that let
+someone in (pairing, rotate, resume, limits, unban, lockdown off, settings):
+
+```bash
+ollamagate totp setup        # scan the QR, confirm one code; restart to enable
+```
+
+The CLI then asks for a code when needed and the TUI unlocks for 5 minutes.
+Lost the phone? Delete `totp.key` in the config directory and restart.
+
 These commands talk to the running server over a local-only channel (a
 `0600` Unix socket, or `127.0.0.1` on Windows, plus a secret in an owner-only
 file). Nothing about it is reachable from the network.
@@ -123,7 +133,7 @@ On first run a self-signed ECDSA P-256 certificate is created in the config
 directory (`tls/cert.pem`, `tls/key.pem`). Its SHA-256 fingerprint is printed at
 startup and included in pairing links so clients can pin it.
 
-**All device state is in memory.** Only the config file, the TLS key/cert and,
+**All device state is in memory.** Only the config file, the TLS key/cert, the optional `totp.key` and,
 while running, the admin channel files in `run/` are on disk. Restarting the server forgets every device; they
 must pair again.
 
