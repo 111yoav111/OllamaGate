@@ -21,7 +21,7 @@ from ..uaparse import summarize as summarize_ua
 from .ipc import AdminError
 
 # "Seen recently" threshold for the yellow status dot.
-RECENT_SECONDS = 300
+RECENT_SECONDS = 90  # an open /app tab pings every 30s, so a closed one drops to idle quickly
 
 # Settings that are safe to change while running: (section, key) -> type.
 RUNTIME_SETTINGS: dict[str, type] = {

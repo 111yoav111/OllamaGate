@@ -294,7 +294,7 @@ def create_app(
         )
 
     register_pairing_routes(app, config, state, fingerprint, client_ip, record_failure, client_ca)
-    register_app_routes(app, state, unauthorized)
+    register_app_routes(app, state, unauthorized, client_ip)
 
     gate = PriorityGate(config.server.max_upstream_concurrency)
     app.state.priority_gate = gate

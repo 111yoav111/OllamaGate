@@ -52,6 +52,7 @@ def register_app_routes(
     app: FastAPI,
     state: State,
     unauthorized: Callable[[], Response],
+    client_ip: Callable[[Request], str | None],
 ) -> None:
     assets = {
         path: (resources.files("ollamagate.web").joinpath(name).read_bytes(), ctype)
@@ -76,10 +77,17 @@ def register_app_routes(
 
     @app.get("/app/session", include_in_schema=False)
     async def session(request: Request) -> Response:
-        """Hands the page its CSRF token. Readable only same-origin (no CORS)."""
+        """Hands the page its CSRF token. Readable only same-origin (no CORS).
+
+        The open page also calls it as a heartbeat, so the device shows as
+        online while the tab is open and goes idle soon after it is closed.
+        """
         device = session_device(request)
         if state.lockdown or device is None:
             return unauthorized()
+        ip = client_ip(request)
+        if state.touch_device(device, ip, request.client.port if request.client else None, request.headers.get("user-agent", "")):
+            state.audit("device_new_ip", ip=ip, device_id=device.id)
         token = request.cookies[auth.SESSION_COOKIE]
         return JSONResponse({"name": device.name, "csrf": auth.csrf_token(state.csrf_key, token)})
 

@@ -120,5 +120,10 @@
     await api("/app/logout", { method: "POST" });
     location.replace("/app");
   });
+  // Heartbeat while the tab is visible, so the owner sees this device as online
+  // only while the page is actually open.
+  setInterval(() => {
+    if (csrf && document.visibilityState === "visible") api("/app/session").catch(() => {});
+  }, 30000);
   start().catch(() => status("Can't reach the server. Check the connection and reload."));
 })();

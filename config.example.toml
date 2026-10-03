@@ -8,6 +8,7 @@
 [server]
 host = "127.0.0.1"          # interface to listen on (e.g. your Tailscale IP)
 max_upstream_concurrency = 4 # requests sent to Ollama at once; others queue by priority
+                             # (Ollama itself runs them in parallel only with OLLAMA_NUM_PARALLEL > 1)
 port = 8443
 public_url = ""              # URL devices use to reach you; used in pairing links/QR
 max_body_bytes = 20971520    # 20 MB (vision models need room for images)

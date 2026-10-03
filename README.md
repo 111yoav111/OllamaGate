@@ -9,6 +9,10 @@ has to **pair** first (code, QR or link), then it gets its own revocable token.
 
 - Python 3.11+
 - Ollama running on the same machine, bound to loopback (`OLLAMA_HOST=127.0.0.1`)
+- To answer several devices at once, let Ollama run requests in parallel
+  (`OLLAMA_NUM_PARALLEL=4`, plus `OLLAMA_MAX_LOADED_MODELS=2` if they use different models).
+  OllamaGate already forwards up to `server.max_upstream_concurrency` requests at once;
+  without this, Ollama answers them one after another.
 
 ## Install
 
