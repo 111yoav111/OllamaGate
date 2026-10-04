@@ -459,7 +459,11 @@ Everything else returns `404`.
 
 On first run a self-signed ECDSA P-256 certificate is created in the config
 directory (`tls/cert.pem`, `tls/key.pem`). Its SHA-256 fingerprint is printed
-at startup and included in pairing links so clients can pin it. In `tailscale`
+at startup and included in pairing links so clients can pin it. It covers
+`localhost`, the loopback addresses, `server.host` and the `public_url` host,
+but not the machine's hostname (anyone who connects can read the certificate):
+to reach the server by hostname with certificate checks, add it to
+`tls.extra_sans` (the certificate is regenerated when a name is missing). In `tailscale`
 mode the Tailscale certificate is stored next to it (`tls/tailscale.crt`,
 `tls/tailscale.key`).
 

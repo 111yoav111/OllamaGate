@@ -638,7 +638,7 @@ def service_uninstall(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
     """Stop and remove the per-user service."""
     from . import service
 
-    p = service.plan(None)
+    p = service.plan(None, check_paths=False)
     _run_commands(p.deactivate, dry_run)
     if p.path is not None and p.path.exists() and not dry_run:
         p.path.unlink()

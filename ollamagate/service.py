@@ -52,7 +52,8 @@ def _check_printable(parts: list[str]) -> None:
 
 # Arguments made only of these characters need no quoting.
 _PLAIN = re.compile(r"[\w@+=:,./-]+", re.ASCII)
-_PLAIN_WIN = re.compile(r"[\w@+=:,./\\-]+", re.ASCII)
+# No "=" or ",": cmd.exe treats them as token delimiters.
+_PLAIN_WIN = re.compile(r"[\w@+:./\\-]+", re.ASCII)
 
 
 def _systemd_exec(cmd: list[str]) -> str:
@@ -82,11 +83,18 @@ def _current_user() -> str:
         return ""
 
 
-def plan(config_path: Path | None = None, platform: str = sys.platform, home: Path | None = None) -> ServicePlan:
+def plan(
+    config_path: Path | None = None,
+    platform: str = sys.platform,
+    home: Path | None = None,
+    check_paths: bool = True,
+) -> ServicePlan:
+    """``check_paths=False`` is for uninstall, which only needs the file location."""
     home = home or Path.home()
     cmd = _serve_command(config_path)
     config_dir = _config_dir_env()
-    _check_printable([*cmd, config_dir or ""])
+    if check_paths:
+        _check_printable([*cmd, config_dir or ""])
     if config_dir and platform != "win32":
         cmd = ["/usr/bin/env", f"OLLAMAGATE_CONFIG_DIR={config_dir}", *cmd]
     if platform.startswith("linux"):
@@ -184,11 +192,12 @@ def running_as_admin() -> bool:
 def write_service_file(p: ServicePlan) -> None:
     if p.path is None:
         return
-    p.path.parent.mkdir(parents=True, exist_ok=True)
     # cmd.exe reads batch files in the OEM code page; unit files and plists are UTF-8.
-    encoding = "oem" if p.path.suffix == ".cmd" and sys.platform == "win32" else "utf-8"
+    oem = p.path.suffix == ".cmd" and sys.platform == "win32"
     try:
-        data = p.content.encode(encoding)
+        data = p.content.encode("oem" if oem else "utf-8")
     except UnicodeEncodeError:
-        raise ValueError("a path contains characters the Windows console code page can't represent") from None
+        where = "the Windows console code page" if oem else "UTF-8"
+        raise ValueError(f"a path contains characters that can't be written as {where}") from None
+    p.path.parent.mkdir(parents=True, exist_ok=True)
     p.path.write_bytes(data)

@@ -201,6 +201,7 @@ def test_notify_config_validation(tmp_path):
 # ----- services ---------------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_systemd_unit(tmp_path):
     p = service.plan(Path("/home/me/og.toml"), platform="linux", home=tmp_path)
     assert p.path == tmp_path / ".config/systemd/user/ollamagate.service"
@@ -244,6 +245,7 @@ def test_service_install_dry_run_writes_nothing(monkeypatch, tmp_path):
     assert not any(tmp_path.rglob("*.service")) and not any(tmp_path.rglob("*.plist"))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_service_keeps_the_config_dir(tmp_path, monkeypatch):
     from ollamagate import service
 

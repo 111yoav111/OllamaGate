@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import ssl
 import stat
+import subprocess
 import sys
-import time
 
 import pytest
 from cryptography import x509
@@ -22,10 +22,13 @@ from ollamagate.state import DeviceLimits, State
 
 def test_model_path_check_has_no_catastrophic_backtracking():
     # The old single regex took seconds at 20 characters and grew exponentially.
-    for path in ("/v1/models/" + "a" * 240 + "!", "/v1/models/" + "a/" * 7 + "a" * 200 + "!"):
-        started = time.monotonic()
-        assert classify_endpoint("GET", path) is None
-        assert time.monotonic() - started < 0.5
+    # Run in a subprocess so a regression fails within the timeout instead of hanging CI.
+    code = (
+        "from ollamagate.server.policy import classify_endpoint\n"
+        "for p in ('/v1/models/' + 'a' * 240 + '!', '/v1/models/' + 'a/' * 7 + 'a' * 200 + '!'):\n"
+        "    assert classify_endpoint('GET', p) is None\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=20)
 
 
 @pytest.mark.parametrize(
@@ -104,7 +107,10 @@ def test_setting_accepts_padded_integer():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
-def test_run_dir_is_created_private(tmp_path):
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_run_dir_is_created_private(tmp_path, monkeypatch):
+    # Without the later chmod, so this proves mkdir itself never makes it readable.
+    monkeypatch.setattr(ipc.os, "chmod", lambda *a, **k: None)
     old = os.umask(0o022)
     try:
         rdir = ipc.run_dir(tmp_path)

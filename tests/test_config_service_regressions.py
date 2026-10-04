@@ -106,6 +106,7 @@ def test_rotating_twice_cuts_streams_of_the_dropped_token():
 # ----- services ---------------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_systemd_quotes_awkward_paths(tmp_path):
     p = service.plan(Path("/home/o'brien/my dir/a\\b\".toml"), platform="linux", home=tmp_path)
     line = next(line for line in p.content.splitlines() if line.startswith("ExecStart="))
@@ -114,6 +115,7 @@ def test_systemd_quotes_awkward_paths(tmp_path):
     assert "serve --no-tui" in line
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_windows_script_quotes_cmd_metacharacters(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     monkeypatch.setenv("OLLAMAGATE_CONFIG_DIR", "/srv/R&D/100%")
@@ -185,14 +187,14 @@ def test_ollama_status_tolerates_odd_ps_output():
     assert status.reachable and status.models == [] and status.version == "0.9"
 
 
-def test_log_content_true_is_refused_but_false_still_loads():
-    from ollamagate.config import Config, ConfigError
+def test_log_content_still_loads_but_doctor_flags_it():
+    from ollamagate.config import Config
+    from ollamagate.doctor import check_config
 
     cfg = Config()
-    cfg.validate()
     cfg.logging.log_content = True
-    with pytest.raises(ConfigError, match="never logged"):
-        cfg.validate()
+    cfg.validate()  # existing files that set it keep loading
+    assert any("log_content" in f.title for f in check_config(cfg))
 
 
 def test_failing_audit_listener_is_logged_not_swallowed(caplog):
@@ -207,3 +209,22 @@ def test_failing_audit_listener_is_logged_not_swallowed(caplog):
     with caplog.at_level("ERROR", logger="ollamagate.state"):
         assert state.audit("admin_lockdown_on") is not None
     assert "audit listener failed" in caplog.text
+
+
+def test_uninstall_plan_tolerates_an_odd_config_dir(monkeypatch):
+    from ollamagate import service
+
+    monkeypatch.setenv("OLLAMAGATE_CONFIG_DIR", "/tmp/bad\ndir")
+    with pytest.raises(ValueError):
+        service.plan(None, platform="linux")
+    assert service.plan(None, platform="linux", check_paths=False).path is not None
+
+
+def test_unencodable_service_file_is_refused_before_creating_dirs(tmp_path):
+    from ollamagate import service
+
+    target = tmp_path / "new" / "x.service"
+    p = service.ServicePlan(path=target, content="ExecStart=/tmp/\udcff\n", activate=[], deactivate=[])
+    with pytest.raises(ValueError, match="UTF-8"):
+        service.write_service_file(p)
+    assert not target.parent.exists()

@@ -104,6 +104,11 @@ def check_files(config: Config, config_file: Path | None = None) -> list[Finding
 
 def check_config(config: Config) -> list[Finding]:
     findings = []
+    if config.logging.log_content:
+        # Reserved key, still accepted so existing files load; it does nothing.
+        findings.append(
+            Finding("warn", "logging.log_content has no effect", "Prompts and responses are never logged; remove the key.")
+        )
     if config.server.host in ("0.0.0.0", "::") and config.network.mode == "direct":
         findings.append(
             Finding("warn", "Listening on all interfaces", "Bind to a specific interface (e.g. your Tailscale IP) if possible.")
