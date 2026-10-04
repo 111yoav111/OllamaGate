@@ -203,9 +203,10 @@ def test_notify_config_validation(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_systemd_unit(tmp_path):
-    p = service.plan(Path("/home/me/og.toml"), platform="linux", home=tmp_path)
+    config = tmp_path.resolve() / "og.toml"  # resolved, as the service file uses it
+    p = service.plan(config, platform="linux", home=tmp_path)
     assert p.path == tmp_path / ".config/systemd/user/ollamagate.service"
-    assert "serve --no-tui --config /home/me/og.toml" in p.content
+    assert f"serve --no-tui --config {config}" in p.content
     assert "NoNewPrivileges=true" in p.content and "User=root" not in p.content
     assert ["systemctl", "--user", "enable", "--now", "ollamagate"] in p.activate
 

@@ -108,10 +108,12 @@ def test_rotating_twice_cuts_streams_of_the_dropped_token():
 
 @pytest.mark.skipif(sys.platform == "win32", reason="asserts on POSIX paths")
 def test_systemd_quotes_awkward_paths(tmp_path):
-    p = service.plan(Path("/home/o'brien/my dir/a\\b\".toml"), platform="linux", home=tmp_path)
+    # A resolved base: the config path is resolved, and e.g. macOS's /home is a symlink.
+    base = tmp_path.resolve()
+    p = service.plan(base / "o'brien" / "my dir" / 'a\\b".toml', platform="linux", home=tmp_path)
     line = next(line for line in p.content.splitlines() if line.startswith("ExecStart="))
     # systemd syntax, not POSIX shell: double quotes with C escapes, no '"'"' splicing.
-    assert line.endswith('--config "/home/o\'brien/my dir/a\\\\b\\".toml"')
+    assert line.endswith(f'--config "{base}/o\'brien/my dir/a\\\\b\\".toml"')
     assert "serve --no-tui" in line
 
 
