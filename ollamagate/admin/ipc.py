@@ -60,7 +60,7 @@ def _proof(secret: str, nonce: str) -> str:
 
 def _private_dir(path: Path) -> None:
     """Create ``path`` as a directory only we can use; refuse anything suspicious."""
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)  # never briefly group/world-readable
     st = os.lstat(path)
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         raise RuntimeError(f"{path} must be a real directory, not a symlink")

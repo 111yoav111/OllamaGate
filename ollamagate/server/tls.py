@@ -70,9 +70,7 @@ def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> No
         .not_valid_after(now + dt.timedelta(days=VALIDITY_DAYS))
         .add_extension(x509.SubjectAlternativeName(_san_entries(sans)), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
-        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .sign(key, hashes.SHA256())
     )
     key_pem = key.private_bytes(
@@ -138,6 +136,8 @@ def build_server_context(cert_path: Path, key_path: Path, client_ca_pem: str | N
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.options |= ssl.OP_NO_COMPRESSION | ssl.OP_CIPHER_SERVER_PREFERENCE
+    # Client-initiated TLS 1.2 renegotiation is a cheap CPU DoS (OpenSSL 1.1.1 allows it).
+    ctx.options |= getattr(ssl, "OP_NO_RENEGOTIATION", 0)
     # TLS 1.2 is limited to forward-secret AEAD suites; TLS 1.3 suites are always strong.
     ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
     ctx.load_cert_chain(str(cert_path), str(key_path))
@@ -201,6 +201,9 @@ class ClientCA:
             .not_valid_before(now - dt.timedelta(minutes=5))
             .not_valid_after(now + dt.timedelta(days=CLIENT_CERT_DAYS + 1))
             .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            # Key identifiers: strict X.509 verification (OpenSSL's X509_STRICT, which
+            # newer Pythons enable by default) rejects a chain without them.
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(self._key.public_key()), critical=False)
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=False, content_commitment=False, key_encipherment=False,
@@ -234,6 +237,10 @@ class ClientCA:
             .not_valid_after(now + dt.timedelta(days=CLIENT_CERT_DAYS))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self._key.public_key()), critical=False
+            )
             .sign(self._key, hashes.SHA256())
         )
         password = "-".join("".join(secrets.choice(_P12_ALPHABET) for _ in range(4)) for _ in range(4))

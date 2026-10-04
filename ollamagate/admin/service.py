@@ -9,12 +9,14 @@ from __future__ import annotations
 import copy
 import inspect
 import ipaddress
+import re
 import time
 from dataclasses import asdict, fields, replace
 from typing import Any
 from urllib.parse import urlsplit
 
 from ..config import Config, ConfigError, is_loopback_host
+from ..ratelimit import client_key
 from ..server import auth, pairing
 from ..state import PRIORITIES, Device, DeviceLimits, DeviceStatus, State, WindowState
 from ..uaparse import summarize as summarize_ua
@@ -262,7 +264,10 @@ class Admin:
             addr = ipaddress.ip_address(ip.strip())
         except ValueError:
             raise AdminError(f"not an IP address: {ip!r}") from None
-        if addr.is_loopback:
+        # Bans cover client_key(ip): an IPv4-mapped address bans its IPv4 address,
+        # an IPv6 address its whole /64 - either can include loopback.
+        covered = ipaddress.ip_network(client_key(str(addr)))
+        if covered.network_address.is_loopback or ipaddress.ip_address("::1") in covered:
             raise AdminError("refusing to ban loopback (that's you)")
         if seconds is not None and (not _is_int(seconds) or seconds < 60):
             raise AdminError("seconds must be at least 60 (or omitted for until-lifted)")
@@ -382,13 +387,13 @@ class Admin:
 
     def set_setting(self, key: str, value: Any) -> dict[str, Any]:
         """Change a runtime-safe setting until restart (config.toml is not modified)."""
-        if key not in RUNTIME_SETTINGS:
+        if not isinstance(key, str) or key not in RUNTIME_SETTINGS:
             raise AdminError(f"not changeable at runtime; allowed: {', '.join(RUNTIME_SETTINGS)}")
         wanted = RUNTIME_SETTINGS[key]
         if isinstance(value, str) and wanted is not str:
             if wanted is bool and value.lower() in ("true", "false", "on", "off", "yes", "no"):
                 value = value.lower() in ("true", "on", "yes")
-            elif wanted is int and len(value) <= 12 and value.strip().isascii() and value.strip().lstrip("-").isdigit():
+            elif wanted is int and re.fullmatch(r"-?[0-9]{1,12}", value.strip()):
                 value = int(value)
         if wanted is int and not _is_int(value) or wanted is not int and not isinstance(value, wanted):
             raise AdminError(f"{key} must be {wanted.__name__}")

@@ -38,10 +38,23 @@ _EXACT: dict[tuple[str, str], EndpointKind] = {
     ("GET", "/v1/models"): EndpointKind.INFERENCE,
 }
 
-_BLOB_RE = re.compile(r"^/api/blobs/sha256[:\-][0-9a-f]{64}$")
-# Model names like "library/llama3:8b"; every segment must contain a non-dot
-# character so "." / ".." segments (which httpx normalises away) can't be used.
-_MODEL_RE = re.compile(r"^/v1/models/(?:[A-Za-z0-9_:\-.]*[A-Za-z0-9_:\-][A-Za-z0-9_:\-.]*/?){1,8}$")
+# fullmatch, not "$": "$" also matches before a trailing newline (a decoded "%0A").
+_BLOB_RE = re.compile(r"/api/blobs/sha256[:\-][0-9a-f]{64}")
+_MODEL_PREFIX = "/v1/models/"
+_MODEL_SEGMENT_RE = re.compile(r"[A-Za-z0-9_:\-.]+")
+
+
+def _is_model_path(path: str) -> bool:
+    """``/v1/models/<name>`` with names like "library/llama3:8b".
+
+    Checked segment by segment (a single nested-quantifier regex backtracks
+    exponentially on a near-miss). Every segment must contain a non-dot
+    character so "." / ".." segments (which httpx normalises away) can't be used.
+    """
+    if len(path) > 256 or not path.startswith(_MODEL_PREFIX) or ".." in path:
+        return False
+    segments = path[len(_MODEL_PREFIX) :].split("/")
+    return len(segments) <= 8 and all(_MODEL_SEGMENT_RE.fullmatch(s) and s.strip(".") for s in segments)
 
 
 def classify_endpoint(method: str, path: str) -> EndpointKind | None:
@@ -49,9 +62,9 @@ def classify_endpoint(method: str, path: str) -> EndpointKind | None:
     kind = _EXACT.get((method, path))
     if kind is not None:
         return kind
-    if method in ("HEAD", "POST") and _BLOB_RE.match(path):
+    if method in ("HEAD", "POST") and _BLOB_RE.fullmatch(path):
         return EndpointKind.MANAGEMENT
-    if method == "GET" and len(path) <= 256 and _MODEL_RE.match(path) and ".." not in path and not path.endswith("/"):
+    if method == "GET" and _is_model_path(path):
         return EndpointKind.INFERENCE
     return None
 
@@ -127,12 +140,12 @@ def _clamp_int(value: object, maximum: int) -> int:
 # our checks on one key while Ollama used the other. So where Go does struct
 # matching (top level, options, stream_options) only plain lowercase ASCII keys
 # are accepted - every real field name is written that way anyway.
-_PLAIN_KEY = re.compile(r"^[a-z0-9_]{1,64}$")
+_PLAIN_KEY = re.compile(r"[a-z0-9_]{1,64}")
 _NATIVE_OPTION_ENDPOINTS = {"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"}
 
 
 def _keys_are_plain(obj: dict) -> bool:
-    return all(_PLAIN_KEY.match(k) for k in obj)
+    return all(_PLAIN_KEY.fullmatch(k) for k in obj)
 
 
 def _reject_constant(name: str) -> None:

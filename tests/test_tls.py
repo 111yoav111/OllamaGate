@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import ssl
 import sys
+import warnings
 
 import httpx
 
@@ -40,13 +41,18 @@ def test_server_context_enforces_tls12_minimum(tmp_path):
 
                 assert hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest() == tls.cert_fingerprint(cert)
                 assert s.version() in ("TLSv1.2", "TLSv1.3")
-        # TLS 1.1 is refused.
+        # The server context itself refuses anything below TLS 1.2 ...
+        assert tls.build_server_context(cert, key).minimum_version is ssl.TLSVersion.TLSv1_2
+        # ... and a TLS 1.0/1.1-only client can't complete a handshake.
         old = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         old.check_hostname = False
         old.verify_mode = ssl.CERT_NONE
         try:
-            old.minimum_version = ssl.TLSVersion.TLSv1
-            old.maximum_version = ssl.TLSVersion.TLSv1_1
+            with warnings.catch_warnings():
+                # Naming the old versions is deprecated; using them here is the point.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                old.minimum_version = ssl.TLSVersion.TLSv1
+                old.maximum_version = ssl.TLSVersion.TLSv1_1
         except ValueError:
             return
         with socket.create_connection(("127.0.0.1", server.port)) as raw:
