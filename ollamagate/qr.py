@@ -9,18 +9,21 @@ import qrcode.image.svg
 
 
 def _matrix(data: str, border: int = 2) -> list[list[bool]]:
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=border)
+    # Low error correction: a code on a screen isn't damaged, and it's a size or
+    # two smaller, so it fits a terminal without scrolling.
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=border)
     qr.add_data(data)
     qr.make(fit=True)
     return qr.get_matrix()
 
 
-def render_text(data: str, invert: bool = True) -> str:
+def render_text(data: str, invert: bool = True, border: int = 2) -> str:
     """Render ``data`` as a QR code using half-block characters (two rows per line).
 
     ``invert`` draws dark modules as spaces, which scans best on dark terminals.
+    ``border`` is the quiet zone in modules; 0 when the caller draws its own.
     """
-    matrix = _matrix(data)
+    matrix = _matrix(data, border)
     if len(matrix) % 2:
         matrix.append([False] * len(matrix[0]))
     chars = {

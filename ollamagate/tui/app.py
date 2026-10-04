@@ -451,7 +451,8 @@ class GateTUI(App[None]):
             parts.append(Text(f"Wrong code attempts: {window.attempts}/{window.max_attempts}", style="red"))
         info.update(Group(*parts))
         if mine.get("qr_url") and not qr_box.content:
-            qr_box.update(Text(qr.render_text(mine["qr_url"], invert=False), no_wrap=True))
+            # No built-in border: the box's white padding is the quiet zone.
+            qr_box.update(Text(qr.render_text(mine["qr_url"], invert=False, border=0), no_wrap=True))
 
     # ----- settings -------------------------------------------------------------------
 
