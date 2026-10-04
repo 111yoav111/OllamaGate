@@ -82,7 +82,7 @@ class Notifier:
         self.config = config
         self.state = state
         self.client = client
-        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_SIZE)
+        self.queue: asyncio.Queue[tuple[bool, str]] = asyncio.Queue(maxsize=QUEUE_SIZE)  # (priority, text)
         self._sent: list[float] = []
         self.dropped = 0
         # Bans can be mass-produced (e.g. many IPv6 /64s): count them and send one
@@ -106,10 +106,8 @@ class Notifier:
         message = describe(entry, self.state)
         if message is None:
             return
-        if kind in PRIORITY:
-            message = "\x00" + message  # marker: bypasses the rate limit
         try:
-            self.queue.put_nowait(message)
+            self.queue.put_nowait((kind in PRIORITY, message))
         except asyncio.QueueFull:
             self.dropped += 1
 
@@ -130,19 +128,18 @@ class Notifier:
         try:
             while True:
                 try:
-                    message = await asyncio.wait_for(self.queue.get(), SUMMARY_INTERVAL / 4)
+                    item = await asyncio.wait_for(self.queue.get(), SUMMARY_INTERVAL / 4)
                 except asyncio.TimeoutError:
-                    message = None
+                    item = None
                 now = time.monotonic()
                 if now - self._last_summary >= SUMMARY_INTERVAL:
                     summary = self._summary()
                     if summary:
                         self._last_summary = now
                         await self._deliver(client, summary)
-                if message is None:
+                if item is None:
                     continue
-                priority = message.startswith("\x00")
-                message = message.lstrip("\x00")
+                priority, message = item
                 self._sent = [t for t in self._sent if now - t < 60]
                 if not priority and len(self._sent) >= MAX_PER_MINUTE:
                     self.dropped += 1

@@ -224,6 +224,10 @@ class Config:
             raise ConfigError("pairing.ttl_seconds must be between 30 and 3600")
         if not (1 <= self.pairing.max_attempts <= 10):
             raise ConfigError("pairing.max_attempts must be between 1 and 10")
+        if self.pairing.requests_per_minute_per_ip < 1:
+            raise ConfigError("pairing.requests_per_minute_per_ip must be at least 1")
+        if self.logging.audit_size < 0 or self.logging.request_log_size < 0:
+            raise ConfigError("logging.audit_size and logging.request_log_size must not be negative")
         if self.limits.priority not in ("low", "normal", "high"):
             raise ConfigError("limits.priority must be low, normal or high")
         g = self.geoip
@@ -292,11 +296,12 @@ def _coerce(value: typing.Any, hint: typing.Any, where: str) -> typing.Any:
             return False
         raise ConfigError(f"{where} must be a boolean")
     if hint is int:
-        if isinstance(value, bool):
+        # A float is accepted only if it is a whole number: 8443.5 is a typo, not 8443.
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
             raise ConfigError(f"{where} must be an integer")
         try:
             return int(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigError(f"{where} must be an integer") from exc
     if hint is float:
         if isinstance(value, bool):
@@ -334,8 +339,13 @@ def load_config(path: Path | None = None, env: typing.Mapping[str, str] | None =
         candidate = cfg.config_dir / "config.toml"
         path = candidate if candidate.exists() else None
     if path is not None:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
+        try:
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"{path} is not valid TOML: {exc}") from None
+        except OSError as exc:
+            raise ConfigError(f"cannot read {path}: {exc.strerror or exc}") from None
         for section, values in data.items():
             if section not in SECTIONS or not isinstance(values, dict):
                 raise ConfigError(f"unknown config section [{section}]")

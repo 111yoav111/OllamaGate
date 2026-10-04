@@ -13,19 +13,22 @@ from typing import Any
 
 
 def safe_text(value: str, limit: int | None = None) -> str:
-    """Replace control/format characters (incl. ESC, C1, bidi overrides) with ``\\xNN`` escapes."""
+    """Replace control/format characters (incl. ESC, C1, bidi overrides) and the
+    Unicode line/paragraph separators with ``\\xNN`` / ``\\uNNNN`` escapes."""
     truncated = limit is not None and len(value) > limit
     if truncated:
         value = value[:limit]  # slice first: never walk a huge attacker-sized string
     out = []
     for ch in value:
-        if unicodedata.category(ch)[0] == "C":
-            out.append(f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}")
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Zl", "Zp"):  # U+2028/U+2029 break lines in many viewers
+            code = ord(ch)
+            out.append(f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}" if code < 0x10000 else f"\\U{code:08x}")
         else:
             out.append(ch)
     text = "".join(out)
     if limit is not None and len(text) > limit:
-        text = text[:limit]
+        text, truncated = text[:limit], True
     return text + "…" if truncated else text
 
 

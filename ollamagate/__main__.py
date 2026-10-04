@@ -23,6 +23,8 @@ cli = typer.Typer(add_completion=False, no_args_is_help=True, help="OllamaGate -
 devices_cli = typer.Typer(no_args_is_help=True, help="Manage paired devices")
 cli.add_typer(devices_cli, name="devices")
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
 ConfigOption = typer.Option(None, "--config", "-c", help="Path to config.toml", exists=True, dir_okay=False)
 
 
@@ -95,7 +97,6 @@ def serve(
         typer.secho(f"Network setup error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
     log_lines: deque[str] = deque(maxlen=200)
-    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     configure_logging(no_tui, log_lines)
 
     for note in network_notes:
@@ -108,7 +109,11 @@ def serve(
     except (OSError, ValueError) as exc:  # fail closed: country rules must not silently vanish
         typer.secho(f"GeoIP database error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
-    tls_info = prepare_tls(config)
+    try:
+        tls_info = prepare_tls(config)
+    except (OSError, ValueError) as exc:  # missing/unreadable/invalid certificate or key
+        typer.secho(f"TLS setup error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     # Only a self-signed certificate is pinned in pairing links; CA-issued ones
     # (Tailscale, Let's Encrypt) are renewed and reloaded, so a pin would go stale.
     fingerprint = tls_info.fingerprint if tls_info and config.tls.mode == "self-signed" else None
@@ -121,10 +126,20 @@ def serve(
 
         client_ca = ClientCA()
     app = create_app(config, state, fingerprint=fingerprint, client_ca=client_ca)
-    server = build_server(config, app, state, tls_info, own_logging=no_tui, client_ca=client_ca)
+    try:
+        server = build_server(config, app, state, tls_info, own_logging=no_tui, client_ca=client_ca)
+    except (OSError, ValueError) as exc:  # e.g. certificate and key don't match
+        typer.secho(f"TLS setup error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     admin = Admin(state, config, fingerprint)
     # Bind now, so "address in use" is reported before any TUI takes over the terminal.
-    sock = server.config.bind_socket()
+    try:
+        sock = server.config.bind_socket()
+    except SystemExit:  # uvicorn logs why and exits; with the TUI that log is still in memory
+        if not no_tui:
+            for line in log_lines:
+                typer.echo(line, err=True)
+        raise typer.Exit(1)
 
     if no_tui:
         typer.echo(f"OllamaGate listening on {config.base_url}")
@@ -169,7 +184,7 @@ def serve(
                 else:
                     # The TUI died on its own. Devices live in memory, so stopping the server
                     # would disconnect everyone: keep serving headless instead.
-                    logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+                    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, force=True)
                     for line in log_lines:
                         typer.echo(line, err=True)
                     typer.secho(
@@ -216,12 +231,11 @@ async def _maintenance(config: Config, server: Any, tls_info: Any) -> None:
 def configure_logging(headless: bool, log_lines: Any) -> None:
     """Headless: log to stderr. With the TUI: keep recent lines in memory instead,
     because writing to the terminal would corrupt the TUI."""
-    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     if headless:
-        logging.basicConfig(level=logging.INFO, format=fmt, force=True)
+        logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, force=True)
     else:
         handler = _BufferHandler(log_lines)
-        handler.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
+        handler.setFormatter(logging.Formatter(LOG_FORMAT, "%H:%M:%S"))
         logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     # httpx/httpcore log every request URL at INFO. Notification URLs contain secrets
     # (the Telegram bot token, the ntfy topic), so keep those loggers quiet.
@@ -285,7 +299,7 @@ def pair(
             status = _call(config_path, "pairing.status", window_id=info["window_id"])
             if status["state"] != "open":
                 break
-            left = int(status["expires_at"] - time.time())
+            left = max(0, int(status["expires_at"] - time.time()))
             typer.echo(f"\r  Waiting for a device... {left // 60}:{left % 60:02d} left  ", nl=False)
             time.sleep(1)
     except KeyboardInterrupt:
@@ -604,13 +618,17 @@ def service_install(
     if service.running_as_admin():
         typer.secho("Refusing to install as root/Administrator: run this as your normal user.", fg=typer.colors.RED)
         raise typer.Exit(2)
-    p = service.plan(config_path)
-    if p.path is not None:
-        typer.echo(f"{'Would write' if dry_run else 'Writing'} {p.path}")
-        if dry_run:
-            typer.echo(p.content)
-        else:
-            service.write_service_file(p)
+    try:
+        p = service.plan(config_path)
+        if p.path is not None:
+            typer.echo(f"{'Would write' if dry_run else 'Writing'} {p.path}")
+            if dry_run:
+                typer.echo(p.content)
+            else:
+                service.write_service_file(p)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.secho(f"Cannot install the service: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
     _run_commands(p.activate, dry_run)
     typer.echo("Note: restarting the service forgets every device (state is in memory); they must pair again.")
 
@@ -653,7 +671,7 @@ def doctor(config_path: Optional[Path] = ConfigOption) -> None:
     config = _load(config_path)
     colors = {"ok": typer.colors.GREEN, "warn": typer.colors.YELLOW, "error": typer.colors.RED}
     worst = "ok"
-    for f in doc.run_all(config):
+    for f in doc.run_all(config, config_path):
         typer.secho(f"[{f.level.upper():5}] {f.title}", fg=colors[f.level])
         if f.fix:
             typer.echo(f"        fix: {f.fix}")

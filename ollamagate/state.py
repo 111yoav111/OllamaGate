@@ -428,9 +428,13 @@ class State:
         if new_hash in self._device_by_token_hash:
             raise ValueError("token hash collision")
         now = time.time()
-        # Only one previous token is kept; an older one stops working now.
+        # Only one previous token is kept; an older one stops working now, streams included.
         if device.previous_token_hash:
-            self._device_by_token_hash.pop(device.previous_token_hash, None)
+            older = device.previous_token_hash
+            self._device_by_token_hash.pop(older, None)
+            for s in self.device_streams(device_id):
+                if s.token_hash == older:
+                    s.kill("token rotated")
         if grace_seconds > 0:
             device.previous_token_hash = device.token_hash
             device.previous_token_valid_until = now + grace_seconds

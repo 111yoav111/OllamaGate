@@ -91,6 +91,11 @@ class BanList:
             return None
         now = time.time() if now is None else now
         key = client_key(ip)
+        existing = self.bans.get(key)
+        if existing is not None and existing.active(now):
+            # Already banned (it got here with someone's valid credential): never let
+            # an auto-ban replace the current one, e.g. shorten a manual until-lifted ban.
+            return None
         hits = self._failures.get(key)
         if hits is None:
             if len(self._failures) >= MAX_TRACKED_CLIENTS:

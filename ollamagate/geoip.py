@@ -34,7 +34,7 @@ class GeoIP:
             return None
         try:
             record = self.reader.get(str(addr))
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):  # RuntimeError: maxminddb's InvalidDatabaseError
             return None
         country = record.get("country") if isinstance(record, dict) else None
         code = country.get("iso_code") if isinstance(country, dict) else None
@@ -62,5 +62,8 @@ def load(config: GeoIPConfig) -> GeoIP | None:
         return None
     import maxminddb
 
-    reader = maxminddb.open_database(config.database)
+    try:
+        reader = maxminddb.open_database(config.database)
+    except maxminddb.InvalidDatabaseError as exc:  # a RuntimeError: callers expect ValueError
+        raise ValueError(f"{config.database} is not a valid MaxMind DB file") from exc
     return GeoIP(reader, config.allow_countries, config.deny_countries)

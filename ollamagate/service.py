@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import getpass
 import os
-import shlex
-import subprocess
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +25,7 @@ LAUNCHD_LABEL = "com.ollamagate"
 
 @dataclass
 class ServicePlan:
-    path: Path | None  # file to write (None on Windows)
+    path: Path | None  # file to write
     content: str
     activate: list[list[str]]  # commands that enable/start it
     deactivate: list[list[str]]
@@ -42,20 +41,52 @@ def _serve_command(config_path: Path | None, python: str | None = None) -> list[
     cmd = [python or sys.executable, "-m", "ollamagate", "serve", "--no-tui"]
     if config_path is not None:
         cmd += ["--config", str(config_path.resolve())]
-    if any(ord(ch) < 0x20 for part in cmd for ch in part):
-        raise ValueError("paths with control characters can't be used in a service definition")
     return cmd
 
 
+def _check_printable(parts: list[str]) -> None:
+    # A newline in a path would start a new directive in the unit file / script.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for part in parts for ch in part):
+        raise ValueError("paths with control characters can't be used in a service definition")
+
+
+# Arguments made only of these characters need no quoting.
+_PLAIN = re.compile(r"[\w@+=:,./-]+", re.ASCII)
+_PLAIN_WIN = re.compile(r"[\w@+=:,./\\-]+", re.ASCII)
+
+
 def _systemd_exec(cmd: list[str]) -> str:
-    """Quote for ExecStart: systemd expands % specifiers and $VARIABLES itself."""
-    return shlex.join(cmd).replace("%", "%%").replace("$", "$$")
+    """Quote for ExecStart. systemd has its own syntax (not a shell's): it expands
+    % specifiers and $VARIABLES even inside quotes, and C-unescapes double-quoted words."""
+
+    def quote(arg: str) -> str:
+        if _PLAIN.fullmatch(arg):
+            return arg
+        return '"' + arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
+
+    return " ".join(quote(a) for a in cmd)
+
+
+def _cmd_quote(arg: str) -> str:
+    """Quote for a .cmd script: inside double quotes & | < > ^ are literal, but %
+    still expands, so it is doubled. (Windows paths can't contain double quotes.)"""
+    if _PLAIN_WIN.fullmatch(arg):
+        return arg
+    return '"' + arg.replace("%", "%%") + '"'
+
+
+def _current_user() -> str:
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):  # no login name and no passwd entry (some containers)
+        return ""
 
 
 def plan(config_path: Path | None = None, platform: str = sys.platform, home: Path | None = None) -> ServicePlan:
     home = home or Path.home()
     cmd = _serve_command(config_path)
     config_dir = _config_dir_env()
+    _check_printable([*cmd, config_dir or ""])
     if config_dir and platform != "win32":
         cmd = ["/usr/bin/env", f"OLLAMAGATE_CONFIG_DIR={config_dir}", *cmd]
     if platform.startswith("linux"):
@@ -83,7 +114,7 @@ WantedBy=default.target
                 ["systemctl", "--user", "daemon-reload"],
                 ["systemctl", "--user", "enable", "--now", SERVICE_NAME],
                 # Keep user services running when you're logged out.
-                ["loginctl", "enable-linger", getpass.getuser()],
+                ["loginctl", "enable-linger", _current_user()],
             ],
             deactivate=[["systemctl", "--user", "disable", "--now", SERVICE_NAME]],
         )
@@ -126,8 +157,10 @@ WantedBy=default.target
         win_cmd = _serve_command(config_path, str(pythonw) if pythonw.exists() else None)
         appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
         path = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "OllamaGate.cmd"
-        env_line = f'set "OLLAMAGATE_CONFIG_DIR={config_dir}"\r\n' if config_dir else ""
-        script = "@echo off\r\n" + env_line + "start \"OllamaGate\" /min " + subprocess.list2cmdline(win_cmd) + "\r\n"
+        _check_printable(win_cmd)
+        env_line = f'set "OLLAMAGATE_CONFIG_DIR={config_dir.replace("%", "%%")}"\r\n' if config_dir else ""
+        command = " ".join(_cmd_quote(a) for a in win_cmd)
+        script = "@echo off\r\n" + env_line + 'start "OllamaGate" /min ' + command + "\r\n"
         return ServicePlan(
             path=path,
             content=script,
@@ -152,4 +185,10 @@ def write_service_file(p: ServicePlan) -> None:
     if p.path is None:
         return
     p.path.parent.mkdir(parents=True, exist_ok=True)
-    p.path.write_text(p.content)
+    # cmd.exe reads batch files in the OEM code page; unit files and plists are UTF-8.
+    encoding = "oem" if p.path.suffix == ".cmd" and sys.platform == "win32" else "utf-8"
+    try:
+        data = p.content.encode(encoding)
+    except UnicodeEncodeError:
+        raise ValueError("a path contains characters the Windows console code page can't represent") from None
+    p.path.write_bytes(data)

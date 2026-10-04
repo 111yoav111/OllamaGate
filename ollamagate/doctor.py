@@ -89,10 +89,10 @@ def _owner_only(path: Path) -> bool:
     return not (mode & (stat.S_IRWXG | stat.S_IRWXO))
 
 
-def check_files(config: Config) -> list[Finding]:
+def check_files(config: Config, config_file: Path | None = None) -> list[Finding]:
+    """``config_file``: the config actually in use (default: config.toml in the config dir)."""
     findings = []
-    for name in ("config.toml", "tls/key.pem"):
-        path = config.config_dir / name
+    for path in (config_file or config.config_dir / "config.toml", config.config_dir / "tls" / "key.pem"):
         if path.exists() and not _owner_only(path):
             findings.append(
                 Finding("warn", f"{path} is readable by other users", f"chmod 600 {path}")
@@ -238,13 +238,13 @@ def check_geoip(config: Config) -> list[Finding]:
     return [Finding("ok", f"GeoIP database loaded ({meta.database_type}, {age_days:.0f} days old)")]
 
 
-def run_all(config: Config) -> list[Finding]:
+def run_all(config: Config, config_file: Path | None = None) -> list[Finding]:
     return (
         check_ollama_running(config)
         + check_ollama_binding(config)
         + check_tls(config)
         + check_network_mode(config)
-        + check_files(config)
+        + check_files(config, config_file)
         + check_config(config)
         + check_geoip(config)
     )

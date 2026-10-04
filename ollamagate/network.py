@@ -37,7 +37,12 @@ Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+    except subprocess.TimeoutExpired:
+        raise ConfigError(f"`{' '.join(cmd[:2])}` did not answer within 60 seconds") from None
+    except OSError as exc:
+        raise ConfigError(f"could not run {cmd[0]}: {exc.strerror or exc}") from None
 
 
 @dataclass
@@ -94,7 +99,7 @@ def tailscale_info(run: Runner = _run) -> TailscaleInfo:
 
 def tailscale_cert(info: TailscaleInfo, tls_dir: Path, run: Runner = _run) -> tuple[Path, Path]:
     """Fetch (or refresh) the Tailscale HTTPS certificate for this machine."""
-    tls_dir.mkdir(parents=True, exist_ok=True)
+    tls_dir.mkdir(mode=0o700, parents=True, exist_ok=True)  # holds the private key
     cert, key = tls_dir / "tailscale.crt", tls_dir / "tailscale.key"
     proc = run(["tailscale", "cert", "--cert-file", str(cert), "--key-file", str(key), info.dns_name])
     if proc.returncode != 0 and "access denied" in (proc.stderr + proc.stdout).lower():

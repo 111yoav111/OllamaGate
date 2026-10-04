@@ -31,7 +31,7 @@ async def probe(client: httpx.AsyncClient) -> OllamaStatus:
     except (httpx.HTTPError, ValueError, AttributeError) as exc:
         return OllamaStatus(reachable=False, error=type(exc).__name__)
     models = []
-    for m in ps:
+    for m in ps if isinstance(ps, list) else []:
         if isinstance(m, dict):
             models.append(
                 LoadedModel(
