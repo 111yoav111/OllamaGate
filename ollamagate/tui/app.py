@@ -4,7 +4,7 @@ It runs in the same process and on the same event loop as the proxy, and acts
 only through ``Admin`` - the same audited code path the CLI uses. It is never
 reachable over the network.
 
-Live updates: the screen polls ``state.version`` twice a second and redraws
+Live updates: the screen polls ``state.version`` once a second and redraws
 only when something changed, so a flood of requests can't make it spin.
 """
 
@@ -106,6 +106,7 @@ class GateTUI(App[None]):
         self._seen_version = -1
         self._last_audit_seq = 0
         self._audit_rendered_seq = -1
+        self._bans_rendered: list[tuple[str, ...]] | None = None
         self._search = ""
         self._audit_filter = ""
         # Plaintext pairing secrets live only here, only while the window is open.
@@ -206,8 +207,9 @@ class GateTUI(App[None]):
         """Once a second: countdowns, "x seconds ago" and pairing state change."""
         if not self._is_live():
             return
-        self._update_pairing()
-        self._update_dashboard()
+        self._update_pairing()  # always: it also drops the plaintext secrets once the window closes
+        if self._q(TabbedContent).active == "dashboard":
+            self._update_dashboard()
 
     def refresh_all(self) -> None:
         """Redraw what is visible. Hidden tabs are redrawn when they are shown."""
@@ -231,7 +233,7 @@ class GateTUI(App[None]):
             self.ollama = await probe(self._ollama_client)
         except Exception as exc:  # noqa: BLE001 - whatever Ollama returns, keep running
             self.ollama = OllamaStatus(reachable=False, error=type(exc).__name__)
-        if self._is_live():
+        if self._is_live() and self._q(TabbedContent).active == "dashboard":
             self._update_dashboard()
 
     def _notify_new_events(self) -> None:
@@ -240,9 +242,13 @@ class GateTUI(App[None]):
         Tracks the audit sequence number, not the log length: the log is a ring
         buffer whose length stops changing once it is full.
         """
-        new = [e for e in self.state.audit_log if e.seq > self._last_audit_seq][-5:]
+        new: list[Any] = []
+        for e in reversed(self.state.audit_log):  # newest first; stop at what we've seen
+            if e.seq <= self._last_audit_seq or len(new) == 5:
+                break
+            new.append(e)
         self._last_audit_seq = self.state.audit_seq
-        for e in new:
+        for e in reversed(new):
             name = self._device_name(e.device_id)
             if e.event == "pairing_succeeded":
                 self.say(f"New device paired: {name}", title="Pairing", timeout=8)
@@ -379,17 +385,25 @@ class GateTUI(App[None]):
     def _update_bans(self) -> None:
         table = self._q("#ban-table", DataTable)
         bans = sorted(self.admin.list_bans(), key=lambda b: b["created_at"], reverse=True)
-        if [row.key.value for row in table.ordered_rows] == [b["key"] for b in bans]:
+        rows = [
+            (
+                b["key"],
+                "until lifted" if b["until"] is None else ts(b["until"]),
+                "manual" if b["manual"] else f"auto (strike {b['strikes']})",
+                b["reason"],
+            )
+            for b in bans
+        ]
+        if rows == self._bans_rendered:
             return  # unchanged: don't rebuild (keeps the cursor where the owner put it)
+        self._bans_rendered = rows
         selected = None
         if table.row_count:
             selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         table.clear()
-        for b in bans:
-            until = "until lifted" if b["until"] is None else ts(b["until"])
-            kind = "manual" if b["manual"] else f"auto (strike {b['strikes']})"
-            table.add_row(t(b["key"]), t(until), t(kind), t(b["reason"]), key=b["key"])
-        if selected in [b["key"] for b in bans]:
+        for row in rows:
+            table.add_row(*(t(cell) for cell in row), key=row[0])
+        if selected in [row[0] for row in rows]:
             table.move_cursor(row=table.get_row_index(selected))
 
     def _update_pairing(self) -> None:
@@ -517,7 +531,7 @@ class GateTUI(App[None]):
         self.call_after_refresh(self._focus_tab, tab)  # again, after any focus restore
 
     def _focus_tab(self, tab: str) -> None:
-        # Move focus into the shown tab: tables so their keys (r, t, s, k…) work, and
+        # Move focus into the shown tab: tables so their keys (r, t, s, n…) work, and
         # always *something* in the tab, because Textual switches back to whichever tab
         # holds the focused widget (e.g. after closing the detail screen).
         # Leave focus in the tab's own search box: a late TabActivated (e.g. the first

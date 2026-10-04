@@ -80,16 +80,18 @@
       // The chat in this browser needs the certificate installed first.
       $("open-chat").textContent = "Install the certificate, then open chat in this browser →";
     }
+    $("done-title").focus(); // the form (and the focused button) just disappeared
   });
 
   $("copy").addEventListener("click", async () => {
     const t = $("token");
+    let copied = true;
     try {
       await navigator.clipboard.writeText(t.value);
     } catch (e) {
       t.select();
-      document.execCommand("copy");
+      copied = document.execCommand("copy");
     }
-    $("copy").textContent = "Copied";
+    $("copy").textContent = copied ? "Copied" : "Copy it manually";
   });
 })();

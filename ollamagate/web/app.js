@@ -10,12 +10,20 @@
     return fetch(path, Object.assign({}, options, { headers, credentials: "same-origin", cache: "no-store" }));
   }
 
+  // Change the log, then keep it scrolled to the end only if it already was:
+  // someone reading further up shouldn't be yanked down by every token.
+  function follow(change) {
+    const log = $("log");
+    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    change();
+    if (atEnd) log.scrollTop = log.scrollHeight;
+  }
+
   function bubble(role, text) {
     const div = document.createElement("div");
     div.className = "msg " + role;
     div.textContent = text; // never innerHTML: model output is untrusted
-    $("log").appendChild(div);
-    $("log").scrollTop = $("log").scrollHeight;
+    follow(() => $("log").appendChild(div));
     return div;
   }
 
@@ -55,8 +63,21 @@
     bubble("user", text);
     const out = bubble("assistant", "");
     $("send").hidden = true; $("stop").hidden = false; status("");
+    // Screen readers: announce the finished answer, not every streamed token.
+    $("log").setAttribute("aria-busy", "true");
     controller = new AbortController();
     let answer = "";
+    const handle = (line) => {
+      line = line.trim();
+      if (!line) return;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { return; }
+      if (msg.error) { bubble("error", String(msg.error)); return; }
+      if (msg.message && typeof msg.message.content === "string") {
+        answer += msg.message.content;
+        follow(() => { out.textContent = answer; });
+      }
+    };
     try {
       const res = await api("/api/chat", {
         method: "POST",
@@ -74,23 +95,16 @@
         buf += decoder.decode(value, { stream: true });
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim();
+          handle(buf.slice(0, nl));
           buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let msg;
-          try { msg = JSON.parse(line); } catch (e) { continue; }
-          if (msg.error) { bubble("error", String(msg.error)); continue; }
-          if (msg.message && typeof msg.message.content === "string") {
-            answer += msg.message.content;
-            out.textContent = answer;
-            $("log").scrollTop = $("log").scrollHeight;
-          }
         }
       }
+      handle(buf + decoder.decode()); // a last line without a trailing newline
     } catch (e) {
       if (e.name !== "AbortError") bubble("error", "Connection lost.");
     } finally {
       controller = null;
+      $("log").removeAttribute("aria-busy");
       $("send").hidden = false; $("stop").hidden = true;
       if (answer) {
         history.push({ role: "assistant", content: answer });
@@ -111,13 +125,13 @@
     send(text);
   });
   $("prompt").addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("composer").requestSubmit(); }
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); $("composer").requestSubmit(); }
   });
   $("stop").addEventListener("click", () => controller && controller.abort());
   $("new").addEventListener("click", () => { if (!controller) { history = []; $("log").textContent = ""; } });
   $("model").addEventListener("change", () => { try { localStorage.setItem("og-model", $("model").value); } catch (e) { /* ignore */ } });
   $("logout").addEventListener("click", async () => {
-    await api("/app/logout", { method: "POST" });
+    try { await api("/app/logout", { method: "POST" }); } catch (e) { return status("Can't reach the server to sign out."); }
     location.replace("/app");
   });
   // Heartbeat while the tab is visible, so the owner sees this device as online
