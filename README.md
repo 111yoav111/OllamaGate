@@ -1,5 +1,6 @@
 # OllamaGate
 
+[![CI](https://github.com/111yoav111/OllamaGate/actions/workflows/ci.yml/badge.svg)](https://github.com/111yoav111/OllamaGate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
@@ -87,6 +88,10 @@ How devices reach OllamaGate depends on the [network mode](#network-access).
 pipx install git+https://github.com/111yoav111/OllamaGate
 ```
 
+[pipx](https://pipx.pypa.io) puts the `ollamagate` command on your `PATH` in
+its own virtual environment. `pip install git+https://...` inside a venv you
+manage works too.
+
 **2. Configure**
 
 OllamaGate runs with safe defaults and no config file (HTTPS on
@@ -98,6 +103,7 @@ Tailscale is the easiest: no router ports, and a real certificate.
 mkdir -p ~/.config/ollamagate
 curl -o ~/.config/ollamagate/config.toml \
   https://raw.githubusercontent.com/111yoav111/OllamaGate/main/config.example.toml
+chmod 600 ~/.config/ollamagate/config.toml   # it may hold notification secrets
 ```
 
 See [Configuration](#configuration) for the macOS and Windows paths.
@@ -222,8 +228,10 @@ Keys:
 | `B` | ban the device's IP |
 | `O` | notes (in details) |
 | `/` | search |
+| `1`-`6` | switch tabs |
+| `U` | lift a ban (Bans tab) |
 | `Ctrl+L` | **lockdown** |
-| `Q` | quit |
+| `Q` / `Ctrl+Q` | quit |
 
 Destructive actions ask for confirmation.
 
@@ -235,7 +243,7 @@ resume.
 
 ```bash
 ollamagate devices list
-ollamagate devices show <id>             # id or its first 8 characters
+ollamagate devices show <id>             # full id or a unique prefix (4+ characters)
 ollamagate devices rename <id> "Work laptop"
 ollamagate devices notes <id> "Anna's phone, replaced 2026-09"
 ollamagate devices model-management <id> --allow|--deny   # pull/push/delete/create/copy
@@ -365,12 +373,15 @@ Copy [`config.example.toml`](config.example.toml) to your config directory as
 
 | OS | Config dir |
 |---|---|
-| Linux | `~/.config/ollamagate/` |
+| Linux | `~/.config/ollamagate/` (or `$XDG_CONFIG_HOME/ollamagate/`) |
 | macOS | `~/Library/Application Support/ollamagate/` |
 | Windows | `%APPDATA%\ollamagate\` |
 
+The example lists every key with its default; all of them are optional, and
+unknown keys are rejected. Keep the file owner-readable only (`chmod 600`).
 Every value can be overridden with `OLLAMAGATE_<SECTION>__<KEY>` env vars, e.g.
-`OLLAMAGATE_SERVER__PORT=9443`. `OLLAMAGATE_CONFIG_DIR` changes the directory.
+`OLLAMAGATE_SERVER__PORT=9443` (lists are comma-separated). `OLLAMAGATE_CONFIG_DIR`
+changes the directory, and most commands take `--config <file>` to use a specific file.
 
 ## Running as a service
 
@@ -422,8 +433,10 @@ not replace securing the host machine or the devices you pair.
 - Anyone who knows an ntfy topic name can read its notifications; pick an
   unguessable one.
 
-The full threat model and known limitations are in [SECURITY.md](SECURITY.md),
-along with how to report a vulnerability.
+The full threat model and known limitations are in [SECURITY.md](SECURITY.md).
+Please report vulnerabilities privately through
+[GitHub's private vulnerability reporting](https://github.com/111yoav111/OllamaGate/security/advisories/new),
+not in a public issue.
 
 ### What's exposed
 
@@ -433,7 +446,7 @@ along with how to report a vulnerability.
 | `GET /pair` | pairing window open | pairing page (404 otherwise) |
 | `POST /pair/claim` | pairing secret | returns the device token once |
 | `GET /me` | device token | the device's own name, token prefix, limits |
-| `/app` | session cookie | built-in chat for browsers paired via `/pair` |
+| `/app`, `/app/*` | session cookie | built-in chat for browsers paired via `/pair` |
 | `/api/*` | device token | Ollama native API ([allowlisted endpoints](#using-the-api) only) |
 | `/v1/*` | device token | OpenAI-compatible API ([allowlisted endpoints](#using-the-api) only) |
 
@@ -443,7 +456,9 @@ Everything else returns `404`.
 
 On first run a self-signed ECDSA P-256 certificate is created in the config
 directory (`tls/cert.pem`, `tls/key.pem`). Its SHA-256 fingerprint is printed
-at startup and included in pairing links so clients can pin it.
+at startup and included in pairing links so clients can pin it. In `tailscale`
+mode the Tailscale certificate is stored next to it (`tls/tailscale.crt`,
+`tls/tailscale.key`).
 
 Only the config file, the TLS key/cert and, while running, the admin channel
 files in `run/` are on disk. Devices, usage counters, bans, the audit log and
@@ -489,6 +504,10 @@ git clone https://github.com/111yoav111/OllamaGate && cd OllamaGate
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"     # Windows: .venv\Scripts\pip
 .venv/bin/python -m pytest -q
 ```
+
+CI installs the exact, hash-pinned versions from `requirements-dev.lock`
+(`pip install --require-hashes -r requirements-dev.lock`, then
+`pip install --no-deps -e .`); use that to reproduce a CI run.
 
 Built with [FastAPI](https://fastapi.tiangolo.com), [Uvicorn](https://www.uvicorn.org),
 [HTTPX](https://www.python-httpx.org), [Textual](https://textual.textualize.io)

@@ -2,14 +2,15 @@ name: CI
 
 # Kept cheap on purpose (Windows minutes count 2x, macOS 10x):
 # - runs on pushes to main/dev and on pull requests, not on every branch push
-# - skips docs-only changes
+# - skips docs-only changes (README.md and config.example.toml are still tested,
+#   see tests/test_polish_docs.py; later patterns override earlier ones)
 # - Linux only by default; Windows/macOS via "Run workflow" (full_matrix)
 on:
   push:
     branches: [main, dev]
-    paths-ignore: ["**.md", "config.example.toml"]
+    paths: ["**", "!**.md", "README.md"]
   pull_request:
-    paths-ignore: ["**.md", "config.example.toml"]
+    paths: ["**", "!**.md", "README.md"]
   workflow_dispatch:
     inputs:
       full_matrix:
@@ -34,10 +35,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
       - run: python -m pip install --require-hashes -r requirements-dev.lock
       - run: python -m pip install --no-deps -e .
       - run: python -m pytest -q
@@ -47,10 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
       - run: python -m pip install --require-hashes -r requirements.lock
       - run: python -m pip wheel --no-deps -w dist .
       - run: python -m pip install --no-deps dist/*.whl

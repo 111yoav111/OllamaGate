@@ -1,21 +1,30 @@
 # OllamaGate example configuration.
-# Copy to your config dir (Linux: ~/.config/ollamagate/config.toml,
+# Copy to your config dir (Linux: ~/.config/ollamagate/config.toml, or $XDG_CONFIG_HOME/ollamagate,
 # macOS: ~/Library/Application Support/ollamagate/config.toml,
-# Windows: %APPDATA%\ollamagate\config.toml) and keep it owner-readable only.
+# Windows: %APPDATA%\ollamagate\config.toml) and keep it owner-readable only
+# (chmod 600). Every key is optional; unknown keys are an error.
 # Any value can be overridden with env vars: OLLAMAGATE_<SECTION>__<KEY>, e.g.
 #   OLLAMAGATE_SERVER__PORT=9443
 
 [server]
-host = "127.0.0.1"          # interface to listen on (e.g. your Tailscale IP)
+host = "127.0.0.1"           # interface to listen on: "0.0.0.0" or a LAN IP for direct mode
+                             # (tailscale mode picks the Tailscale IP itself)
+port = 8443
+public_url = ""              # https://host[:port] devices use to reach you; used in pairing links/QR
+                             # (empty = derived from host/port, which only works on this machine)
+max_body_bytes = 20971520    # 20 MB (vision models need room for images)
+header_timeout = 15.0        # seconds a client gets to send its request headers
+body_timeout = 120.0         # ... and the whole request body
+max_connections = 512        # open connections in total
+max_connections_per_ip = 32  # per client (IPv6: per /64)
 max_upstream_concurrency = 4 # requests sent to Ollama at once; others queue by priority
                              # (Ollama itself runs them in parallel only with OLLAMA_NUM_PARALLEL > 1)
-port = 8443
-public_url = ""              # URL devices use to reach you; used in pairing links/QR
-max_body_bytes = 20971520    # 20 MB (vision models need room for images)
+queue_timeout = 120.0        # seconds a request may wait in that queue before "503 server busy"
 
 [network]
 mode = "direct"              # direct | tailscale | cloudflare | letsencrypt
 trusted_proxies = []         # CIDRs allowed to set X-Forwarded-For / CF-Connecting-IP
+                             # (cloudflare mode defaults to the local tunnel: 127.0.0.1/32, ::1/128)
 
 [ollama]
 url = "http://127.0.0.1:11434"   # must be loopback
@@ -24,14 +33,14 @@ read_timeout = 600.0
 
 [tls]
 mode = "self-signed"         # self-signed | files | off (off = loopback only)
-cert_file = ""
+cert_file = ""               # tls.mode = "files": PEM certificate (chain) and private key
 key_file = ""
 extra_sans = []              # extra hostnames/IPs for the self-signed cert
 client_certs = false         # mTLS: issue each device a client cert at pairing and require it with the token
 
 [pairing]
-ttl_seconds = 300
-max_attempts = 5
+ttl_seconds = 300            # how long a pairing window stays open (30-3600)
+max_attempts = 5             # wrong codes before the code is disabled (1-10; QR/link get 10x)
 requests_per_minute_per_ip = 10
 
 # Defaults for every newly paired device (0 = unlimited for token quotas);
@@ -39,10 +48,10 @@ requests_per_minute_per_ip = 10
 [limits]
 tokens_per_day = 0
 tokens_per_month = 0
-requests_per_minute = 60
+requests_per_minute = 60     # 0 = unlimited
 max_concurrent = 2
-max_num_ctx = 8192
-max_num_predict = 4096
+max_num_ctx = 8192           # larger requested context sizes are clamped (0 = don't clamp)
+max_num_predict = 4096       # output length cap, also max_tokens on /v1 (0 = don't clamp)
 allowed_models = []          # empty = all installed models
 allow_model_management = false
 priority = "normal"          # low | normal | high
@@ -68,7 +77,7 @@ allow_countries = []         # e.g. ["DE", "AT"]: refuse every other country (an
 deny_countries = []          # e.g. ["XX"]: refuse these countries
                              # LAN, loopback and Tailscale addresses are never filtered.
 
-[logging]
-audit_size = 5000
-request_log_size = 5000
-log_content = false          # never log prompts/responses unless you really mean it
+[logging]                    # in memory only, cleared on restart
+audit_size = 5000            # audit log entries kept
+request_log_size = 5000      # request log entries kept
+log_content = false          # reserved: prompts and responses are never logged

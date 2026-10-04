@@ -1,14 +1,46 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
-venv/
 build/
 dist/
+.eggs/
+
+# Virtual environments
+.venv*/
+venv/
+env/
+.env
+.env.*
+
+# Test, coverage and tool caches
 .pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
-# Local config and TLS material must never be committed
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local config, runtime files and TLS material must never be committed
+# (a config dir pointed at the checkout would create tls/ and run/ here).
 config.toml
+tls/
+run/
 *.pem
 *.key
+*.crt
+*.p12
+*.pfx
+*.mmdb
+*.log

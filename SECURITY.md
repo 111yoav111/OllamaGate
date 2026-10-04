@@ -16,7 +16,7 @@ and the host machine itself.
 - **No anonymous access.** Every route except `/healthz` (and `/pair*` while the
   owner has a pairing window open) requires a device token.
   Requests to `/api/*` and `/v1/*` without a valid token get a generic `401`
-  (no hint whether the path exists); every other path returns `404`. There is no
+  (no hint whether the path exists); unknown paths return `404`. There is no
   `Server` header, no OpenAPI/docs route, and no trailing-slash redirects.
 - **Tokens.** 256-bit random (`secrets`), prefixed `og_dev_` so leaks are easy to
   spot. Only the SHA-256 hash is stored, and comparison is constant time. Tokens
@@ -77,8 +77,9 @@ and the host machine itself.
   stored with control characters escaped and escaped again on output, so no
   one can inject terminal escape sequences into the owner's CLI.
 - **Audit log flooding.** Events that unauthenticated clients can trigger
-  (failed logins, rate-limit hits) are capped at 10 per client per minute; the
-  rest are only counted, so real events aren't flushed out.
+  (failed logins, rate-limit hits) are capped at 10 per client and 100 per
+  event type per minute; the rest are only counted, so real events aren't
+  flushed out.
 - **Admin channel.** CLI administration uses a `0600` Unix socket in a `0700`
   directory (Windows: `127.0.0.1` on a random port) *and* a 256-bit secret from
   an owner-only file, compared in constant time. Replies carry an HMAC proof over
@@ -231,7 +232,20 @@ and the host machine itself.
 - On Windows the admin secret file relies on the per-user profile ACLs; keep the
   config directory in your profile (the default `%APPDATA%`).
 
-## Reporting
+## Supported versions
 
-Please report vulnerabilities privately to the repository owner rather than in a
-public issue.
+OllamaGate is pre-1.0: security fixes land on `main` (and in the next release)
+only, so stay on the latest version (`pipx upgrade ollamagate`).
+
+## Reporting a vulnerability
+
+Please **do not open a public issue** for a security problem. Report it
+privately through GitHub's
+[private vulnerability reporting](https://github.com/111yoav111/OllamaGate/security/advisories/new)
+(the repository's *Security* tab, then *Report a vulnerability*).
+
+Helpful details: the OllamaGate version or commit, your OS and network mode,
+the steps to reproduce, and what an attacker gains. Please leave out real
+device tokens, client certificates, pairing secrets and prompts. This is a
+spare-time project, so responses are best effort; once a fix is out the
+advisory is published, with credit if you want it.
