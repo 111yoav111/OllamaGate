@@ -124,7 +124,7 @@ def make_fake_ollama() -> tuple[Starlette, Recorder]:
             return broken_json()
         return JSONResponse(
             {
-                "modelfile": "# Modelfile\nFROM /mnt/Games/ollama/blobs/sha256-d3\nPARAMETER stop </s>\n",
+                "modelfile": "# Modelfile\nFROM /mnt/data/ollama/blobs/sha256-d3\nPARAMETER stop </s>\n",
                 "template": "{{ .Prompt }}",
                 "license": "see https://example.com/a/b/LICENSE",
                 "details": {"parent_model": "/usr/share/ollama/.ollama/models/blobs/sha256-d3", "format": "gguf"},

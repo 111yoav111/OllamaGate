@@ -63,6 +63,10 @@ class PriorityGate:
     def _wake(self) -> None:
         while self._waiters and self.active < self.capacity:
             *_, fut, ticket = heapq.heappop(self._waiters)
+            if fut.done():
+                # Cancelled, but its task hasn't run its cleanup yet: skip it
+                # (set_result would raise and strand everyone queued behind it).
+                continue
             self.active += 1
             ticket.held = True  # the waiter now owns a slot, even if it gets cancelled
             fut.set_result(None)

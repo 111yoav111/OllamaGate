@@ -33,6 +33,7 @@ T = TypeVar("T")
 FORWARD_REQUEST_HEADERS = ("content-type", "accept")
 # Only these response headers are passed back to the client.
 FORWARD_RESPONSE_HEADERS = ("content-type",)
+_FORWARD_RESPONSE_HEADERS_RAW = frozenset(name.encode() for name in FORWARD_RESPONSE_HEADERS)
 # How long we try to deliver an in-band error before giving up on a client.
 TRAILER_TIMEOUT = 1.0
 
@@ -147,11 +148,15 @@ class ProxyStreamResponse(Response):
         self.bytes_out = 0
 
     def _headers(self) -> list[tuple[bytes, bytes]]:
-        headers = []
-        for name in FORWARD_RESPONSE_HEADERS:
-            value = self.upstream.headers.get(name)
-            if value is not None:
-                headers.append((name.encode("latin-1"), value.encode("latin-1")))
+        # Raw bytes, first occurrence only: re-encoding httpx's decoded (possibly
+        # UTF-8 or comma-joined) values could fail or merge duplicate headers.
+        headers: list[tuple[bytes, bytes]] = []
+        seen: set[bytes] = set()
+        for key, value in self.upstream.headers.raw:
+            name = key.lower()
+            if name in _FORWARD_RESPONSE_HEADERS_RAW and name not in seen:
+                seen.add(name)
+                headers.append((name, value))
         return headers
 
     async def _pump(self, send: Send) -> str:

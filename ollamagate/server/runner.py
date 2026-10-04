@@ -105,10 +105,19 @@ def raise_fd_limit() -> None:
     except ImportError:  # Windows
         return
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    target = hard if hard != resource.RLIM_INFINITY else 65536
-    if soft != resource.RLIM_INFINITY and soft < target:
-        with contextlib.suppress(ValueError, OSError):
-            resource.setrlimit(resource.RLIMIT_NOFILE, (min(target, 65536), hard))
+    if soft == resource.RLIM_INFINITY:
+        return
+    target = min(hard, 65536) if hard != resource.RLIM_INFINITY else 65536
+    # macOS reports an unlimited hard limit but refuses more than OPEN_MAX
+    # (10240) per process, so fall back to that rather than keeping the 256 default.
+    for candidate in (target, min(target, 10240)):
+        if candidate <= soft:
+            return
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (candidate, hard))
+            return
+        except (ValueError, OSError):
+            continue
 
 
 def build_uvicorn_config(

@@ -19,9 +19,16 @@ def _parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
         return None
 
 
+def _in_networks(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, trusted: Sequence[IPNetwork]) -> bool:
+    # A dual-stack socket reports IPv4 peers as "::ffff:a.b.c.d"; match them
+    # against IPv4 entries too, as bans and GeoIP already do.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return any(addr in net or (mapped is not None and mapped in net) for net in trusted)
+
+
 def is_trusted(ip: str, trusted: Sequence[IPNetwork]) -> bool:
     addr = _parse_ip(ip)
-    return addr is not None and any(addr in net for net in trusted)
+    return addr is not None and _in_networks(addr, trusted)
 
 
 def resolve_client_ip(
@@ -52,6 +59,6 @@ def resolve_client_ip(
         addr = _parse_ip(hop)
         if addr is None:
             break
-        if not any(addr in net for net in trusted):
+        if not _in_networks(addr, trusted):
             return str(addr)
     return peer_ip
