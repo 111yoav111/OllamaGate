@@ -212,8 +212,10 @@ def test_systemd_unit(tmp_path):
 
 
 def test_launchd_plist_escapes_paths(tmp_path):
-    p = service.plan(Path("/Users/me/a&b.toml"), platform="darwin", home=tmp_path)
-    assert "<string>/Users/me/a&amp;b.toml</string>" in p.content
+    config = tmp_path.resolve() / "a&b.toml"  # resolved, as the plist uses it (any OS)
+    p = service.plan(config, platform="darwin", home=tmp_path)
+    assert f"<string>{str(config).replace('&', '&amp;')}</string>" in p.content
+    assert "a&b.toml" not in p.content
     assert p.activate == [["launchctl", "load", "-w", str(p.path)]]
 
 
