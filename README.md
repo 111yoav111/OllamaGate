@@ -235,7 +235,7 @@ Keys:
 
 Destructive actions ask for confirmation.
 
-**Lockdown** rejects all traffic (`503`), cuts every stream and closes pairing,
+**Lockdown** answers every request with `503`, cuts every stream and closes pairing,
 but keeps all devices; press `Ctrl+L` again (or `ollamagate lockdown off`) to
 resume.
 
@@ -281,8 +281,11 @@ it pairs and editable live (TUI `L`, or `ollamagate devices limits`):
 | `priority` | when Ollama is busy (`server.max_upstream_concurrency`), high goes first |
 
 A stream that is cut off before Ollama reports its token counts is charged an
-estimate, so disconnecting early doesn't dodge the quota (a device can still
-end up slightly over it).
+estimate, so disconnecting early doesn't dodge the quota. Quotas are checked
+when a request starts and charged when it ends, so a device can end up over
+its quota: each of its concurrent requests may use up to the remaining output
+allowance, plus its prompt (bounded by `max_num_ctx`). Set `max_concurrent`
+low for devices whose quota must be close to exact.
 
 Clients that keep failing to log in or pair (10 times in 10 minutes by default)
 are banned for an hour, doubling on repeat offenses (`[bans]` in the config).

@@ -23,7 +23,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, TabbedContent, TabPane
 
 from .. import qr

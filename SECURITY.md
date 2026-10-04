@@ -68,11 +68,12 @@ and the host machine itself.
   slightly from "5 attempts destroy the window" on purpose: otherwise anyone who
   notices a window is open could kill it with five junk requests. The window is
   destroyed once every method is used up.
-- **Certificate fingerprint.** Pairing links carry `fp=<sha256>` and the pairing
-  page displays it. Only a client that checks the TLS certificate itself can use
-  it for pinning; the pairing page cannot detect a man-in-the-middle, so compare
-  the fingerprint in the browser's certificate viewer with the one on the
-  server's screen if you are on an untrusted network.
+- **Certificate fingerprint.** Pairing links carry `fp=<sha256>` for API clients
+  that check the TLS certificate themselves and can pin it. The pairing page
+  shows the fingerprint the *server reports* after a successful claim, which a
+  man-in-the-middle would simply relay, so the page cannot detect one. On an
+  untrusted network, compare the fingerprint in the browser's certificate viewer
+  with the one on the server's screen.
 - **Terminal safety.** Paths, user agents and other client-supplied text are
   stored with control characters escaped and escaped again on output, so no
   one can inject terminal escape sequences into the owner's CLI.
@@ -99,9 +100,12 @@ and the host machine itself.
   the server keeps running headless instead of dropping every device. Redraws
   are throttled to once a second and limited to the visible tab, so a request
   flood can't starve the proxy through the shared event loop.
-- **Lockdown** (`Ctrl+L` / `ollamagate lockdown on`) rejects every request
-  before authentication - `/healthz` included, so the host doesn't even look
-  alive - cuts all streams and refuses pairing while keeping all devices.
+- **Lockdown** (`Ctrl+L` / `ollamagate lockdown on`) answers every request,
+  on every path (`/healthz` and `/pair` included), with the same `503` before
+  authentication or routing, so it reveals nothing about which routes exist or
+  whether pairing is open. It cuts all streams and refuses pairing while keeping
+  all devices. (The port still accepts connections and completes TLS
+  handshakes.)
 - **Runtime settings** are limited to a small allowlist (public URL, pairing
   TTL/attempts, and the concurrency / model-management defaults for devices
   paired from then on - existing devices keep their own limits), are

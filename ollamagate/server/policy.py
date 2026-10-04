@@ -90,7 +90,6 @@ class PolicyResult:
     model: str = ""
     error: str | None = None  # set => reject with ``status``
     status: int = 400
-    streaming: bool = False
 
 
 def normalize_model(name: str) -> str:
@@ -251,7 +250,7 @@ def apply_body_policy(
         if seconds is None or not 0 <= seconds <= MAX_KEEP_ALIVE_SECONDS:  # NaN fails too
             data["keep_alive"] = f"{MAX_KEEP_ALIVE_SECONDS // 60}m"
 
-    return PolicyResult(json.dumps(data).encode(), model=model, streaming=streaming)
+    return PolicyResult(json.dumps(data).encode(), model=model)
 
 
 def filter_model_list(limits: DeviceLimits, path: str, body: bytes) -> bytes:

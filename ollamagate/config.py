@@ -226,6 +226,9 @@ class Config:
             raise ConfigError("pairing.max_attempts must be between 1 and 10")
         if self.pairing.requests_per_minute_per_ip < 1:
             raise ConfigError("pairing.requests_per_minute_per_ip must be at least 1")
+        if self.logging.log_content:
+            # Reserved key, kept so existing files still load: content is never logged.
+            raise ConfigError("logging.log_content is not supported: prompts and responses are never logged")
         if self.logging.audit_size < 0 or self.logging.request_log_size < 0:
             raise ConfigError("logging.audit_size and logging.request_log_size must not be negative")
         if self.limits.priority not in ("low", "normal", "high"):

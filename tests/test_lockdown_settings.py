@@ -25,10 +25,12 @@ def test_lockdown_rejects_everything_but_keeps_devices(admin_gate, client):  # n
     assert client.get(gate.url + "/api/tags", headers=bearer(gate.token)).status_code == 503
     assert client.get(gate.url + "/api/tags").status_code == 503  # before auth
     assert client.get(gate.url + "/me", headers=bearer(gate.token)).status_code == 503
-    assert client.get(gate.url + "/pair").status_code == 404
+    # Every path gets the same 503, so lockdown doesn't reveal which routes exist.
+    for path in ("/pair", "/app", "/app/session", "/no-such-path"):
+        assert client.get(gate.url + path).status_code == 503, path
     assert gate.state.pairing_window is None
     assert gate.state.get_device(gate.device.id) is not None
-    assert client.get(gate.url + "/healthz").status_code == 503  # not even "alive"
+    assert client.get(gate.url + "/healthz").status_code == 503
     r = CliRunner().invoke(cli, ["pair", "--no-wait"])
     assert r.exit_code == 1 and "lockdown" in r.output
     assert CliRunner().invoke(cli, ["lockdown", "off"]).exit_code == 0

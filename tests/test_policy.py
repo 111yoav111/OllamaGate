@@ -28,7 +28,7 @@ def test_clamps_native_options():
     r = apply_body_policy(LIM, "/api/chat", body(model="m", options={"num_ctx": 100000, "num_predict": -1}))
     data = json.loads(r.body)
     assert data["options"] == {"num_ctx": 4096, "num_predict": 512}
-    assert r.error is None and r.streaming is True
+    assert r.error is None
 
 
 def test_sets_missing_limits_and_keeps_lower_values():

@@ -183,3 +183,27 @@ def test_ollama_status_tolerates_odd_ps_output():
 
     status = asyncio.run(run())
     assert status.reachable and status.models == [] and status.version == "0.9"
+
+
+def test_log_content_true_is_refused_but_false_still_loads():
+    from ollamagate.config import Config, ConfigError
+
+    cfg = Config()
+    cfg.validate()
+    cfg.logging.log_content = True
+    with pytest.raises(ConfigError, match="never logged"):
+        cfg.validate()
+
+
+def test_failing_audit_listener_is_logged_not_swallowed(caplog):
+    from ollamagate.state import State
+
+    state = State()
+
+    def broken(entry):
+        raise RuntimeError("boom")
+
+    state.audit_listeners.append(broken)
+    with caplog.at_level("ERROR", logger="ollamagate.state"):
+        assert state.audit("admin_lockdown_on") is not None
+    assert "audit listener failed" in caplog.text

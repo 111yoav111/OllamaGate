@@ -137,6 +137,9 @@ def build_uvicorn_config(
         host=config.server.host,
         port=config.server.port,
         http=protocol,
+        # No WebSocket routes exist; an upgrade would also detach the connection
+        # from GuardedH11Protocol and leak its per-IP connection count.
+        ws="none",
         # We resolve client IPs ourselves, only trusting configured proxies.
         proxy_headers=False,
         server_header=False,

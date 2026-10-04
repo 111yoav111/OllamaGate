@@ -1,4 +1,4 @@
-"""Regression tests for the security polish pass."""
+"""Regressions for policy path checks, TLS, admin settings and bans."""
 
 from __future__ import annotations
 
@@ -112,3 +112,32 @@ def test_run_dir_is_created_private(tmp_path):
     finally:
         os.umask(old)
     assert stat.S_IMODE(os.stat(rdir).st_mode) == 0o700
+
+
+def test_wrong_bearer_tokens_on_me_count_towards_a_ban(gate_factory, client):
+    from .test_proxy_stream import bearer
+
+    gate = gate_factory(**{"network__trusted_proxies": ["127.0.0.1/32"], "bans__failures": 3})
+    for i in range(3):
+        headers = {**bearer(f"wrong-{i}"), "X-Forwarded-For": "198.51.100.91"}
+        assert client.get(gate.url + "/me", headers=headers).status_code in (401, 403)
+    assert gate.state.bans.banned("198.51.100.91") is not None
+    # Anonymous requests still don't count (any web page can make a browser send them).
+    for _ in range(5):
+        client.get(gate.url + "/me", headers={"X-Forwarded-For": "198.51.100.92"})
+    assert gate.state.bans.banned("198.51.100.92") is None
+
+
+def test_self_signed_cert_does_not_leak_hostname_or_product(tmp_path):
+    import socket
+
+    sans = tls.default_sans("0.0.0.0", ["gate.example.com"])
+    if socket.gethostname() not in ("localhost", "gate.example.com"):
+        assert socket.gethostname() not in sans
+    cert, _ = tls.ensure_self_signed(tmp_path, sans)
+    parsed = x509.load_pem_x509_certificate(cert.read_bytes())
+    cn = parsed.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+    assert cn == "gate.example.com"
+    cert2, _ = tls.ensure_self_signed(tmp_path / "loopback", ["localhost", "127.0.0.1"])
+    cn2 = x509.load_pem_x509_certificate(cert2.read_bytes()).subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+    assert cn2 == "localhost"

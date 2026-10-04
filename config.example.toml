@@ -35,7 +35,8 @@ read_timeout = 600.0
 mode = "self-signed"         # self-signed | files | off (off = loopback only)
 cert_file = ""               # tls.mode = "files": PEM certificate (chain) and private key
 key_file = ""
-extra_sans = []              # extra hostnames/IPs for the self-signed cert
+extra_sans = []              # extra hostnames/IPs for the self-signed cert (the machine's
+                             # hostname isn't added by default: it would be visible to anyone)
 client_certs = false         # mTLS: issue each device a client cert at pairing and require it with the token
 
 [pairing]

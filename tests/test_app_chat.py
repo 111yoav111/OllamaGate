@@ -113,7 +113,7 @@ def test_lockdown_closes_app(gate):
 
     browser, _, _ = pair_browser(gate)
     gate.call(lambda: Admin(gate.state, gate.app.state.config, None).set_lockdown(True))
-    assert browser.get("/app").status_code in (401, 503)
+    assert browser.get("/app").status_code == 503
 
 
 def test_session_heartbeat_marks_device_seen(gate):

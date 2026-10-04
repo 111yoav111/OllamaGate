@@ -114,7 +114,8 @@ def unauthorized() -> JSONResponse:
 
 
 class BanMiddleware:
-    """Refuse requests from banned clients and blocked countries before any routing.
+    """Refuse requests during lockdown, and from banned clients and blocked
+    countries, before any routing.
 
     A banned client carrying a valid device credential still gets through: bans
     exist to stop guessing, and punishing a paired device for sharing an IP (NAT)
@@ -130,6 +131,11 @@ class BanMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
+            if self.state.lockdown:
+                # One identical answer for every path, so lockdown reveals nothing
+                # about which routes exist or whether pairing is open.
+                await lockdown_response()(scope, receive, send)
+                return
             peer = scope.get("client")
             ip = resolve_client_ip(peer[0] if peer else None, Headers(scope=scope), self.trusted, self.network_mode)
             geo = self.state.geo
@@ -265,7 +271,7 @@ def create_app(
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
-        if state.lockdown:  # don't even confirm the host is alive
+        if state.lockdown:  # same 503 as every other path (BanMiddleware answers first)
             return lockdown_response()
         return PlainTextResponse("ok")
 
@@ -274,10 +280,13 @@ def create_app(
         """Lets a device see what the server knows about it."""
         if state.lockdown:
             return lockdown_response()
-        token = auth.extract_credential(request.headers, request.cookies, state.csrf_key)[0]
+        token, via_cookie = auth.extract_credential(request.headers, request.cookies, state.csrf_key)
         outcome = auth.authenticate(state, token, client_cert=request.scope.get(CLIENT_CERT_SCOPE))
         if outcome.result is not auth.AuthResult.OK or outcome.device is None:
-            state.audit_noisy("auth_failed", ip=client_ip(request), reason=outcome.result.value, path="/me")
+            ip = client_ip(request)
+            state.audit_noisy("auth_failed", ip=ip, reason=outcome.result.value, path="/me")
+            if outcome.result is auth.AuthResult.INVALID and not via_cookie:
+                record_failure(ip, "failed logins", token or "")  # same rule as proxy()
             return unauthorized()
         d = outcome.device
         return JSONResponse(

@@ -104,8 +104,6 @@ def check_files(config: Config, config_file: Path | None = None) -> list[Finding
 
 def check_config(config: Config) -> list[Finding]:
     findings = []
-    if config.logging.log_content:
-        findings.append(Finding("warn", "Prompt/response content logging is enabled", "Set logging.log_content = false."))
     if config.server.host in ("0.0.0.0", "::") and config.network.mode == "direct":
         findings.append(
             Finding("warn", "Listening on all interfaces", "Bind to a specific interface (e.g. your Tailscale IP) if possible.")

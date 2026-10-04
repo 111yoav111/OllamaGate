@@ -100,3 +100,27 @@ def test_fd_limit_falls_back_when_hard_limit_is_unusable(monkeypatch):
     monkeypatch.setattr(resource, "setrlimit", fake_set)
     runner.raise_fd_limit()
     assert calls == [(65536, resource.RLIM_INFINITY), (10240, resource.RLIM_INFINITY)]
+
+
+def test_websocket_upgrades_are_disabled(make_config):
+    # An upgrade would detach the connection from GuardedH11Protocol and leak
+    # its per-IP connection count.
+    from ollamagate.server.app import create_app
+    from ollamagate.server.runner import build_uvicorn_config
+    from ollamagate.state import State
+
+    cfg = make_config("http://127.0.0.1:9")
+    assert build_uvicorn_config(cfg, create_app(cfg, State()), None).ws == "none"
+
+
+def test_new_ip_alerts_group_ipv6_by_64():
+    from ollamagate.state import DeviceLimits, State
+
+    state = State()
+    device = state.add_device(
+        name="p", token_hash="h", token_prefix="p", paired_via="test", limits=DeviceLimits()
+    )
+    assert state.touch_device(device, "2001:db8::1", 1, "") is False  # pairing IP
+    assert state.touch_device(device, "2001:db8::abcd", 1, "") is False  # same /64
+    assert state.touch_device(device, "2001:db8:0:1::1", 1, "") is True  # new /64
+    assert len(device.ip_history) == 2

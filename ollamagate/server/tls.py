@@ -7,7 +7,6 @@ import hashlib
 import ipaddress
 import os
 import secrets
-import socket
 import ssl
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +57,11 @@ def _san_entries(names: list[str]) -> list[x509.GeneralName]:
 def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> None:
     """Create an ECDSA P-256 self-signed certificate valid for ``sans``."""
     key = ec.generate_private_key(ec.SECP256R1())
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "OllamaGate")])
+    # A neutral CN (clients match SANs): don't announce the product to scanners.
+    entries = _san_entries(sans)
+    names = [str(e.value) for e in entries if str(e.value) not in ("localhost", "127.0.0.1", "::1")]
+    cn = names[0] if names else "localhost"
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn[:64])])
     now = dt.datetime.now(dt.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -68,7 +71,7 @@ def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> No
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - dt.timedelta(minutes=5))
         .not_valid_after(now + dt.timedelta(days=VALIDITY_DAYS))
-        .add_extension(x509.SubjectAlternativeName(_san_entries(sans)), critical=False)
+        .add_extension(x509.SubjectAlternativeName(entries), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .sign(key, hashes.SHA256())
@@ -90,7 +93,9 @@ def generate_self_signed(cert_path: Path, key_path: Path, sans: list[str]) -> No
 
 
 def default_sans(host: str, extra: list[str]) -> list[str]:
-    names = ["localhost", "127.0.0.1", "::1", socket.gethostname(), host, *extra]
+    # Not the machine's hostname: anyone can complete a handshake and read the
+    # certificate, so it would leak it to every scanner (add it via tls.extra_sans).
+    names = ["localhost", "127.0.0.1", "::1", host, *extra]
     return list(dict.fromkeys(n for n in names if n and n not in ("0.0.0.0", "::")))
 
 

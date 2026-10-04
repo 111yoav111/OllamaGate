@@ -5,14 +5,15 @@ clears every device, counter, ban and log entry (by design, see the spec).
 
 The server, the admin control channel and the TUI all run on the same asyncio
 event loop, so plain (non-async) method calls are atomic with respect to each
-other. Code that needs to hold state consistent across an ``await`` must take
-``lock``. Mutations bump ``version`` so the TUI can cheaply detect changes.
+other; keep any read-modify-write that must stay consistent free of ``await``.
+Mutations bump ``version`` so the TUI can cheaply detect changes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import enum
+import logging
 import secrets
 import time
 import uuid
@@ -23,6 +24,8 @@ from typing import Any
 from .bans import BanList
 from .ratelimit import RateLimiter, client_key
 from .textsafe import safe_text
+
+log = logging.getLogger("ollamagate.state")
 
 MAX_IP_HISTORY = 20
 MAX_AUDIT_FIELD = 200
@@ -201,7 +204,6 @@ class State:
         # its handshake check meanwhile, see tls.ClientCA.set_pairing_open).
         self.on_pairing_change: Any = None
         self.pairing_history: deque[PairingWindow] = deque(maxlen=50)
-        self.lock = asyncio.Lock()
         # Unauthenticated noise (failed logins etc.) is capped per client so an
         # attacker can't flush real events out of the bounded audit log.
         self._noise_limiter = RateLimiter(NOISY_EVENTS_PER_MINUTE, 60.0)
@@ -253,7 +255,7 @@ class State:
             try:
                 listener(entry)
             except Exception:  # noqa: BLE001 - a listener must never break auditing
-                pass
+                log.exception("audit listener failed")
         return entry
 
     def audit_noisy(self, event: str, *, ip: str | None, **detail: Any) -> AuditEntry | None:
@@ -389,16 +391,19 @@ class State:
             device.user_agent = safe_text(user_agent, 512)
         new_ip = False
         if ip is not None:
-            record = device.ip_history.get(ip)
+            # Keyed like bans and rate limits (IPv6 by /64), so rotating privacy
+            # addresses don't raise a "new IP" alert on every request.
+            key = client_key(ip)
+            record = device.ip_history.get(key)
             if record is None:
                 new_ip = bool(device.ip_history)  # the pairing IP itself isn't "new"
                 if len(device.ip_history) >= MAX_IP_HISTORY:
                     device.ip_history.popitem(last=False)
-                device.ip_history[ip] = IPRecord(first_seen=now, last_seen=now)
+                device.ip_history[key] = IPRecord(first_seen=now, last_seen=now)
             else:
                 record.last_seen = now
                 record.count += 1
-                device.ip_history.move_to_end(ip)
+                device.ip_history.move_to_end(key)
         self._changed()
         return new_ip
 
